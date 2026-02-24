@@ -1,3 +1,4 @@
+using System.ComponentModel.DataAnnotations;
 using System.Text;
 
 namespace Magent.Core;
@@ -45,15 +46,15 @@ public static class ReportRenderer
             .Replace(">", "&gt;")
             .Replace("\n", "<br/>");
 
-        return """
+        var a = """
 <!doctype html>
 <html>
 <head>
 <meta charset=\"utf-8\" />
 <title>Amarr Station Trading Radar</title>
 <style>
-body {{ font-family: Arial, sans-serif; margin: 2rem; background: #0d1117; color: #e6edf3; }}
-.card {{ border: 1px solid #30363d; border-radius: 8px; padding: 1rem; background: #161b22; }}
+body { font-family: Arial, sans-serif; margin: 2rem; background: #0d1117; color: #e6edf3; }
+.card { border: 1px solid #30363d; border-radius: 8px; padding: 1rem; background: #161b22; }
 </style>
 </head>
 <body>
@@ -61,6 +62,9 @@ body {{ font-family: Arial, sans-serif; margin: 2rem; background: #0d1117; color
 </body>
 </html>
 """;
+        a = a.Replace("{md}",md);
+
+        return a;
     }
 
     private static void WriteSection(StringBuilder sb, string title, IEnumerable<Opportunity> opportunities)
