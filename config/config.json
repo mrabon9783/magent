@@ -7,5 +7,9 @@
   "MinNetMarginPct": 2.0,
   "MinDailyVolume": 50,
   "MaxWatchlistSize": 250,
+  "MaxIskPerItem": 500000000.0,
+  "MaxPortfolioExposurePct": 25.0,
+  "MinOrderValue": 20000000.0,
+  "MaxOrdersPerCycle": 10,
   "WebhookUrl": null
 }

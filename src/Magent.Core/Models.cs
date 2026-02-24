@@ -23,6 +23,10 @@ public sealed record AppConfig(
     decimal MinNetMarginPct,
     int MinDailyVolume,
     int MaxWatchlistSize,
+    decimal MaxIskPerItem,
+    decimal MaxPortfolioExposurePct,
+    decimal MinOrderValue,
+    int MaxOrdersPerCycle,
     string? WebhookUrl);
 
 public sealed record CharacterOrder(
@@ -60,10 +64,21 @@ public sealed record Opportunity(
     string Notes,
     decimal NetMarginPct,
     decimal EstimatedProfitIsk,
+    decimal BestBuyPrice,
+    decimal BestSellPrice,
     long DailyVolume,
+    int SuggestedQuantity,
+    decimal SuggestedInvestmentIsk,
     ConfidenceLevel Confidence,
     DateTimeOffset DetectedAt,
     string Fingerprint);
+
+public sealed record PerformanceSnapshot(
+    int TotalRecommendations,
+    int ActiveRecommendations,
+    int ImprovedRecommendations,
+    int ExpiredRecommendations,
+    decimal ImprovementRatePct);
 
 public sealed record RadarSnapshot(
     DateTimeOffset Timestamp,
@@ -71,4 +86,6 @@ public sealed record RadarSnapshot(
     IReadOnlyList<CharacterOrder> CharacterOrders,
     IReadOnlyList<MarketOrder> MarketOrders,
     IReadOnlyList<Opportunity> Opportunities,
+    IReadOnlyDictionary<int, string> TypeNames,
+    PerformanceSnapshot Performance,
     IReadOnlyList<string> RiskNotes);

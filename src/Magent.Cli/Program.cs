@@ -47,7 +47,7 @@ internal sealed class MagentApp(ILoggerFactory loggerFactory)
         var configPath = Path.Combine(_root, "config", "config.json");
         if (!File.Exists(configPath))
         {
-            var config = new AppConfig(10000043, 60008494, 15, 3m, 4.5m, 2m, 50, 250, null);
+            var config = new AppConfig(10000043, 60008494, 15, 3m, 4.5m, 2m, 50, 250, 500_000_000m, 25m, 20_000_000m, 10, null);
             File.WriteAllText(configPath, JsonSerializer.Serialize(config, new JsonSerializerOptions { WriteIndented = true }));
         }
 
@@ -148,30 +148,39 @@ internal sealed class MagentApp(ILoggerFactory loggerFactory)
             x => x.Key,
             x => x.Value.Result.Count == 0 ? 0L : (long)x.Value.Result.TakeLast(7).Average(p => p.Volume));
 
-        var calculator = new OpportunityCalculator();
-        var opportunities = calculator.Calculate(config, characterOrders, marketOrders, dailyVolumes, DateTimeOffset.UtcNow);
-        db.SaveOpportunities(opportunities);
-
         var token = await _tokenStore.LoadRefreshTokenAsync(CancellationToken.None);
         var walletBalance = string.IsNullOrWhiteSpace(token)
             ? 0
             : await SafeCall(() => esi.GetWalletBalanceAsync(token, CancellationToken.None), 0m, "wallet balance");
+
+        var calculator = new OpportunityCalculator();
+        var now = DateTimeOffset.UtcNow;
+        var opportunities = calculator.Calculate(config, characterOrders, marketOrders, dailyVolumes, walletBalance, now)
+            .OrderByDescending(x => x.SuggestedInvestmentIsk)
+            .ThenByDescending(x => x.NetMarginPct)
+            .Take(config.MaxOrdersPerCycle)
+            .ToList();
+        db.SaveOpportunities(opportunities);
+        db.TrackRecommendationHistory(opportunities, now);
+
         var wallet = new WalletSummary(walletBalance, 0, characterOrders.Where(x => x.IsBuyOrder).Sum(x => x.Price * x.VolumeRemain), characterOrders.Where(x => !x.IsBuyOrder).Sum(x => x.Price * x.VolumeRemain));
+        var typeNames = await ResolveTypeNamesAsync(esi, opportunities.Select(x => x.TypeId).Distinct().ToList());
+        var performance = db.GetPerformanceSnapshot();
 
         var snapshot = new RadarSnapshot(
-            DateTimeOffset.UtcNow,
+            now,
             wallet,
             characterOrders,
             marketOrders,
             opportunities,
+            typeNames,
+            performance,
             ["Advisory only. No in-client automation.", "Opportunities limited to Amarr hub station orders."]);
 
         var mdPath = Path.Combine(_root, "out", "today.md");
         var htmlPath = Path.Combine(_root, "out", "today.html");
         await File.WriteAllTextAsync(mdPath, ReportRenderer.ToMarkdown(snapshot));
         await File.WriteAllTextAsync(htmlPath, ReportRenderer.ToHtml(snapshot));
-
-        var typeNames = await ResolveTypeNamesAsync(esi, opportunities.Select(x => x.TypeId).Distinct().ToList());
 
         foreach (var opportunity in opportunities)
         {
@@ -285,6 +294,21 @@ internal sealed class MagentApp(ILoggerFactory loggerFactory)
         if (config.BrokerFeePct < 0 || config.SalesTaxPct < 0 || config.MinNetMarginPct < 0)
         {
             throw new InvalidOperationException("Fee and threshold percentages cannot be negative.");
+        }
+
+        if (config.MaxIskPerItem <= 0 || config.MinOrderValue < 0)
+        {
+            throw new InvalidOperationException("MaxIskPerItem must be > 0 and MinOrderValue cannot be negative.");
+        }
+
+        if (config.MaxPortfolioExposurePct <= 0 || config.MaxPortfolioExposurePct > 100)
+        {
+            throw new InvalidOperationException("MaxPortfolioExposurePct must be in (0, 100].");
+        }
+
+        if (config.MaxOrdersPerCycle <= 0)
+        {
+            throw new InvalidOperationException("MaxOrdersPerCycle must be greater than 0.");
         }
 
         if (!string.IsNullOrWhiteSpace(config.WebhookUrl))
