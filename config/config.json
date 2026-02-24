@@ -1,0 +1,11 @@
+{
+  "RegionId": 10000043,
+  "HubLocationId": 60008494,
+  "PollIntervalMinutes": 15,
+  "BrokerFeePct": 3.0,
+  "SalesTaxPct": 4.5,
+  "MinNetMarginPct": 2.0,
+  "MinDailyVolume": 50,
+  "MaxWatchlistSize": 250,
+  "WebhookUrl": null
+}
