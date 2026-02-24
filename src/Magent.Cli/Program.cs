@@ -171,14 +171,40 @@ internal sealed class MagentApp(ILoggerFactory loggerFactory)
         await File.WriteAllTextAsync(mdPath, ReportRenderer.ToMarkdown(snapshot));
         await File.WriteAllTextAsync(htmlPath, ReportRenderer.ToHtml(snapshot));
 
+        var typeNames = await ResolveTypeNamesAsync(esi, opportunities.Select(x => x.TypeId).Distinct().ToList());
+
         foreach (var opportunity in opportunities)
         {
             if (!dedupeAlerts || db.TryMarkAlertSent(opportunity.Fingerprint))
             {
-                _logger.LogInformation("ALERT {Kind} type={TypeId} margin={Margin}% profit={Profit}", opportunity.Kind, opportunity.TypeId, opportunity.NetMarginPct, opportunity.EstimatedProfitIsk);
+                var typeName = typeNames.GetValueOrDefault(opportunity.TypeId) ?? "Unknown";
+                _logger.LogInformation(
+                    "ALERT {Kind} item={TypeName} ({TypeId}) margin={Margin}% profit={Profit} volume={DailyVolume} confidence={Confidence}",
+                    opportunity.Kind,
+                    typeName,
+                    opportunity.TypeId,
+                    opportunity.NetMarginPct,
+                    opportunity.EstimatedProfitIsk,
+                    opportunity.DailyVolume,
+                    opportunity.Confidence);
                 await PostWebhookAsync(config.WebhookUrl, opportunity);
             }
         }
+    }
+
+    private async Task<Dictionary<int, string>> ResolveTypeNamesAsync(IEsiClient esi, IReadOnlyList<int> typeIds)
+    {
+        var typeNames = new Dictionary<int, string>();
+        foreach (var typeId in typeIds)
+        {
+            var resolved = await SafeCall(() => esi.GetTypeNameAsync(typeId, CancellationToken.None), string.Empty, $"type name for {typeId}");
+            if (!string.IsNullOrWhiteSpace(resolved))
+            {
+                typeNames[typeId] = resolved;
+            }
+        }
+
+        return typeNames;
     }
 
     private async Task PostWebhookAsync(string? webhookUrl, Opportunity opportunity)
