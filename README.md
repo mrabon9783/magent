@@ -78,6 +78,11 @@ export MAGENT_ESI_CLIENT_SECRET=your_esi_application_client_secret
 - `magent report`
   - Generates report from latest cached snapshot in DB without ESI re-sync
 
+- `magent serve`
+  - Starts a live dashboard server at `http://localhost:5000`
+  - Lets you add/remove watchlist type IDs
+  - Lets you select opportunities and copy buy/sell order lines to clipboard
+
 ## Reports
 Generated in `out/`:
 - `today.md`
