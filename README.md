@@ -29,6 +29,10 @@ MVP .NET 8 advisory app for **Amarr station trading radar** in EVE Online.
   "MinNetMarginPct": 2.0,
   "MinDailyVolume": 50,
   "MaxWatchlistSize": 250,
+  "MaxIskPerItem": 500000000.0,
+  "MaxPortfolioExposurePct": 25.0,
+  "MinOrderValue": 20000000.0,
+  "MaxOrdersPerCycle": 10,
   "WebhookUrl": null
 }
 ```
@@ -45,6 +49,8 @@ Run from repository root:
     - `opportunities`
     - `alerts_sent`
     - `watchlist`
+    - `recommendation_history`
+    - `recommendation_outcomes`
 
 - `magent auth`
   - Prompts for an ESI refresh token, verifies it with ESI OAuth verify endpoint, then stores it in:
@@ -83,6 +89,7 @@ Sections:
 - Orders needing update
 - New seed opportunities
 - Flip opportunities
+- Historical performance
 - Risk notes
 
 ## Build/test

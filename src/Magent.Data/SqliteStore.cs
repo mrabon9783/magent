@@ -51,6 +51,25 @@ CREATE TABLE IF NOT EXISTS watchlist (
   type_id INTEGER PRIMARY KEY,
   last_seen_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS recommendation_history (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  fingerprint TEXT NOT NULL UNIQUE,
+  type_id INTEGER NOT NULL,
+  kind TEXT NOT NULL,
+  first_seen_at TEXT NOT NULL,
+  last_seen_at TEXT NOT NULL,
+  initial_margin_pct REAL NOT NULL,
+  latest_margin_pct REAL NOT NULL,
+  status TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS recommendation_outcomes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  history_id INTEGER NOT NULL,
+  outcome TEXT NOT NULL,
+  recorded_at TEXT NOT NULL,
+  FOREIGN KEY(history_id) REFERENCES recommendation_history(id)
+);
 """;
 
         using var command = connection.CreateCommand();
@@ -198,11 +217,84 @@ CREATE TABLE IF NOT EXISTS watchlist (
         return changed > 0;
     }
 
+
+    public void TrackRecommendationHistory(IEnumerable<Opportunity> opportunities, DateTimeOffset nowUtc)
+    {
+        using var connection = Open();
+        using var tx = connection.BeginTransaction();
+
+        foreach (var opportunity in opportunities)
+        {
+            using var upsert = connection.CreateCommand();
+            upsert.CommandText = """
+INSERT INTO recommendation_history(fingerprint,type_id,kind,first_seen_at,last_seen_at,initial_margin_pct,latest_margin_pct,status)
+VALUES($f,$type,$kind,$first,$last,$initial,$latest,'active')
+ON CONFLICT(fingerprint) DO UPDATE SET
+  last_seen_at=excluded.last_seen_at,
+  latest_margin_pct=excluded.latest_margin_pct,
+  status='active';
+""";
+            upsert.Parameters.AddWithValue("$f", opportunity.Fingerprint);
+            upsert.Parameters.AddWithValue("$type", opportunity.TypeId);
+            upsert.Parameters.AddWithValue("$kind", opportunity.Kind.ToString());
+            upsert.Parameters.AddWithValue("$first", nowUtc.ToString("O"));
+            upsert.Parameters.AddWithValue("$last", nowUtc.ToString("O"));
+            upsert.Parameters.AddWithValue("$initial", opportunity.NetMarginPct);
+            upsert.Parameters.AddWithValue("$latest", opportunity.NetMarginPct);
+            upsert.ExecuteNonQuery();
+        }
+
+        using var expire = connection.CreateCommand();
+        expire.CommandText = "UPDATE recommendation_history SET status='expired' WHERE status='active' AND last_seen_at < $cutoff;";
+        expire.Parameters.AddWithValue("$cutoff", nowUtc.AddHours(-24).ToString("O"));
+        expire.ExecuteNonQuery();
+
+        using var outcomes = connection.CreateCommand();
+        outcomes.CommandText = """
+INSERT INTO recommendation_outcomes(history_id,outcome,recorded_at)
+SELECT h.id,
+       CASE WHEN h.latest_margin_pct >= h.initial_margin_pct THEN 'improved' ELSE 'regressed' END,
+       $recorded
+FROM recommendation_history h
+WHERE h.status='active'
+AND NOT EXISTS (
+  SELECT 1 FROM recommendation_outcomes o
+  WHERE o.history_id = h.id
+  AND o.recorded_at >= $cycleStart
+);
+""";
+        outcomes.Parameters.AddWithValue("$recorded", nowUtc.ToString("O"));
+        outcomes.Parameters.AddWithValue("$cycleStart", nowUtc.AddMinutes(-30).ToString("O"));
+        outcomes.ExecuteNonQuery();
+
+        tx.Commit();
+    }
+
+    public PerformanceSnapshot GetPerformanceSnapshot()
+    {
+        using var connection = Open();
+
+        var total = ScalarInt(connection, "SELECT COUNT(*) FROM recommendation_history;");
+        var active = ScalarInt(connection, "SELECT COUNT(*) FROM recommendation_history WHERE status='active';");
+        var expired = ScalarInt(connection, "SELECT COUNT(*) FROM recommendation_history WHERE status='expired';");
+        var improved = ScalarInt(connection, "SELECT COUNT(*) FROM recommendation_outcomes WHERE outcome='improved';");
+        var rate = total == 0 ? 0m : Math.Round((decimal)improved / total * 100m, 2);
+
+        return new PerformanceSnapshot(total, active, improved, expired, rate);
+    }
+
     private SqliteConnection Open()
     {
         var connection = new SqliteConnection($"Data Source={DbPath}");
         connection.Open();
         return connection;
+    }
+
+    private static int ScalarInt(SqliteConnection connection, string sql)
+    {
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = sql;
+        return Convert.ToInt32(cmd.ExecuteScalar());
     }
 
     private static void Execute(SqliteConnection connection, string sql)

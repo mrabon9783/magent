@@ -7,6 +7,7 @@ public sealed class OpportunityCalculator
         IReadOnlyList<CharacterOrder> characterOrders,
         IReadOnlyList<MarketOrder> marketOrders,
         IReadOnlyDictionary<int, long> dailyVolumes,
+        decimal walletBalance,
         DateTimeOffset nowUtc)
     {
         var opportunities = new List<Opportunity>();
@@ -33,7 +34,7 @@ public sealed class OpportunityCalculator
 
                 if (netMarginPct >= config.MinNetMarginPct && volume >= config.MinDailyVolume)
                 {
-                    opportunities.Add(CreateOpportunity(OpportunityKind.Flip, typeId, netMarginPct, estProfit, volume, nowUtc, $"Flip spread exists for type {typeId}"));
+                    opportunities.Add(CreateOpportunity(OpportunityKind.Flip, typeId, netMarginPct, estProfit, bestBuy.Price, bestSell.Price, volume, walletBalance, config, nowUtc, $"Flip spread exists for type {typeId}"));
                 }
             }
 
@@ -52,7 +53,11 @@ public sealed class OpportunityCalculator
                         undercut ? "Order is undercut at hub." : "Order expires within 24 hours.",
                         0,
                         0,
+                        ownSell.Price,
+                        marketBestSell.Price,
                         volume,
+                        0,
+                        0,
                         ConfidenceLevel.Medium,
                         nowUtc,
                         $"update:{typeId}:{(undercut ? "u" : "e")}"));
@@ -65,7 +70,7 @@ public sealed class OpportunityCalculator
                 var estProfit = Math.Max(0, bestSell.Price - bestBuy.Price) * Math.Max(1, Math.Min(bestBuy.VolumeRemain, bestSell.VolumeRemain));
                 if (netMarginPct >= config.MinNetMarginPct && volume >= config.MinDailyVolume)
                 {
-                    opportunities.Add(CreateOpportunity(OpportunityKind.Seed, typeId, netMarginPct, estProfit, volume, nowUtc, "No active order but spread looks healthy."));
+                    opportunities.Add(CreateOpportunity(OpportunityKind.Seed, typeId, netMarginPct, estProfit, bestBuy.Price, bestSell.Price, volume, walletBalance, config, nowUtc, "No active order but spread looks healthy."));
                 }
             }
         }
@@ -85,9 +90,17 @@ public sealed class OpportunityCalculator
         return (sellRevenue - buyCost) / buyCost * 100m;
     }
 
-    private static Opportunity CreateOpportunity(OpportunityKind kind, int typeId, decimal netMarginPct, decimal estProfit, long volume, DateTimeOffset nowUtc, string notes)
+    private static Opportunity CreateOpportunity(OpportunityKind kind, int typeId, decimal netMarginPct, decimal estProfit, decimal bestBuy, decimal bestSell, long volume, decimal walletBalance, AppConfig config, DateTimeOffset nowUtc, string notes)
     {
         var confidence = volume >= 1000 && netMarginPct >= 8 ? ConfidenceLevel.High : volume >= 300 ? ConfidenceLevel.Medium : ConfidenceLevel.Low;
+        var suggestedBudget = Math.Min(config.MaxIskPerItem, walletBalance * (config.MaxPortfolioExposurePct / 100m));
+        var viableBudget = Math.Max(0, suggestedBudget);
+        var suggestedQuantity = bestBuy <= 0 ? 0 : (int)Math.Floor(viableBudget / bestBuy);
+        if (bestBuy * suggestedQuantity < config.MinOrderValue)
+        {
+            suggestedQuantity = 0;
+        }
+
         return new Opportunity(
             kind,
             typeId,
@@ -95,7 +108,11 @@ public sealed class OpportunityCalculator
             notes,
             Math.Round(netMarginPct, 2),
             Math.Round(estProfit, 2),
+            Math.Round(bestBuy, 2),
+            Math.Round(bestSell, 2),
             volume,
+            suggestedQuantity,
+            Math.Round(suggestedQuantity * bestBuy, 2),
             confidence,
             nowUtc,
             $"{kind.ToString().ToLowerInvariant()}:{typeId}:{Math.Round(netMarginPct, 2)}");

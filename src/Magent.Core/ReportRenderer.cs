@@ -1,4 +1,3 @@
-using System.ComponentModel.DataAnnotations;
 using System.Text;
 
 namespace Magent.Core;
@@ -18,9 +17,17 @@ public static class ReportRenderer
         sb.AppendLine($"- Buy order value: {snapshot.Wallet.BuyOrderValue:N2} ISK");
         sb.AppendLine($"- Sell order value: {snapshot.Wallet.SellOrderValue:N2} ISK");
 
-        WriteSection(sb, "Orders needing update", snapshot.Opportunities.Where(x => x.Kind == OpportunityKind.Update));
-        WriteSection(sb, "New seed opportunities", snapshot.Opportunities.Where(x => x.Kind == OpportunityKind.Seed));
-        WriteSection(sb, "Flip opportunities", snapshot.Opportunities.Where(x => x.Kind == OpportunityKind.Flip));
+        WriteSection(sb, "Orders needing update", snapshot.Opportunities.Where(x => x.Kind == OpportunityKind.Update), snapshot.TypeNames);
+        WriteSection(sb, "New seed opportunities", snapshot.Opportunities.Where(x => x.Kind == OpportunityKind.Seed), snapshot.TypeNames);
+        WriteSection(sb, "Flip opportunities", snapshot.Opportunities.Where(x => x.Kind == OpportunityKind.Flip), snapshot.TypeNames);
+
+        sb.AppendLine();
+        sb.AppendLine("## Historical performance");
+        sb.AppendLine($"- Total tracked recommendations: {snapshot.Performance.TotalRecommendations}");
+        sb.AppendLine($"- Active recommendations: {snapshot.Performance.ActiveRecommendations}");
+        sb.AppendLine($"- Improved recommendations: {snapshot.Performance.ImprovedRecommendations}");
+        sb.AppendLine($"- Expired recommendations: {snapshot.Performance.ExpiredRecommendations}");
+        sb.AppendLine($"- Improvement rate: {snapshot.Performance.ImprovementRatePct:N2}%");
 
         sb.AppendLine("## Risk notes");
         if (snapshot.RiskNotes.Count == 0)
@@ -67,7 +74,7 @@ body { font-family: Arial, sans-serif; margin: 2rem; background: #0d1117; color:
         return a;
     }
 
-    private static void WriteSection(StringBuilder sb, string title, IEnumerable<Opportunity> opportunities)
+    private static void WriteSection(StringBuilder sb, string title, IEnumerable<Opportunity> opportunities, IReadOnlyDictionary<int, string> typeNames)
     {
         sb.AppendLine();
         sb.AppendLine($"## {title}");
@@ -80,7 +87,8 @@ body { font-family: Arial, sans-serif; margin: 2rem; background: #0d1117; color:
 
         foreach (var item in items)
         {
-            sb.AppendLine($"- Type {item.TypeId}: {item.Title} | Net margin {item.NetMarginPct:N2}% | Profit {item.EstimatedProfitIsk:N2} ISK | Confidence {item.Confidence}");
+            var typeLabel = typeNames.TryGetValue(item.TypeId, out var name) ? $"{name} ({item.TypeId})" : $"Type {item.TypeId}";
+            sb.AppendLine($"- {typeLabel}: {item.Title} | Buy {item.BestBuyPrice:N2} | Sell {item.BestSellPrice:N2} | Net margin {item.NetMarginPct:N2}% | Profit {item.EstimatedProfitIsk:N2} ISK | Daily volume {item.DailyVolume:N0} | Suggested qty {item.SuggestedQuantity:N0} | Suggested ISK {item.SuggestedInvestmentIsk:N2} | Confidence {item.Confidence}");
         }
     }
 }
