@@ -134,6 +134,8 @@ internal sealed class MagentApp(ILoggerFactory loggerFactory)
     {
         var db = CreateStore();
         db.Initialize();
+        var esi = CreateEsiClient();
+        var typeNameCache = new Dictionary<int, string>();
 
         var builder = WebApplication.CreateBuilder();
         builder.Logging.ClearProviders();
@@ -142,7 +144,7 @@ internal sealed class MagentApp(ILoggerFactory loggerFactory)
         var web = builder.Build();
         web.MapGet("/", () => Results.Content(WebDashboardHtml, "text/html"));
 
-        web.MapGet("/api/dashboard", () =>
+        web.MapGet("/api/dashboard", async () =>
         {
             var watchlist = db.GetWatchlist();
             var latestOrders = db.GetLatestMarketOrders();
@@ -152,30 +154,49 @@ internal sealed class MagentApp(ILoggerFactory loggerFactory)
                 .OrderByDescending(x => x.DetectedAt)
                 .ToList();
 
+            var typeIds = watchlist.Concat(opportunities.Select(x => x.TypeId)).Distinct().ToList();
+            var unknownIds = typeIds.Where(id => !typeNameCache.ContainsKey(id)).ToList();
+            if (unknownIds.Count > 0)
+            {
+                var resolved = await ResolveTypeNamesAsync(esi, unknownIds);
+                foreach (var pair in resolved)
+                {
+                    typeNameCache[pair.Key] = pair.Value;
+                }
+            }
+
             var bestPrices = latestOrders
                 .GroupBy(x => x.TypeId)
                 .ToDictionary(
                     x => x.Key,
                     x => new
                     {
-                        BestBuy = x.Where(o => !o.IsBuyOrder).Select(o => o.Price).DefaultIfEmpty(0m).Min(),
-                        BestSell = x.Where(o => o.IsBuyOrder).Select(o => o.Price).DefaultIfEmpty(0m).Max()
+                        BestBuy = x.Where(o => o.IsBuyOrder).Select(o => o.Price).DefaultIfEmpty(0m).Max(),
+                        BestSell = x.Where(o => !o.IsBuyOrder).Select(o => o.Price).DefaultIfEmpty(0m).Min()
                     });
 
             var payload = opportunities.Select(item => new
             {
                 item.Fingerprint,
                 item.TypeId,
+                TypeName = typeNameCache.GetValueOrDefault(item.TypeId) ?? $"Type {item.TypeId}",
                 Kind = item.Kind.ToString(),
                 item.NetMarginPct,
                 item.EstimatedProfitIsk,
                 Confidence = item.Confidence.ToString(),
                 item.DetectedAt,
                 BestBuy = bestPrices.GetValueOrDefault(item.TypeId)?.BestBuy ?? 0m,
-                BestSell = bestPrices.GetValueOrDefault(item.TypeId)?.BestSell ?? 0m
+                BestSell = bestPrices.GetValueOrDefault(item.TypeId)?.BestSell ?? 0m,
+                Spread = (bestPrices.GetValueOrDefault(item.TypeId)?.BestSell ?? 0m) - (bestPrices.GetValueOrDefault(item.TypeId)?.BestBuy ?? 0m)
             });
 
-            return Results.Json(new { Watchlist = watchlist, Opportunities = payload });
+            var watchlistPayload = watchlist.Select(typeId => new
+            {
+                TypeId = typeId,
+                TypeName = typeNameCache.GetValueOrDefault(typeId) ?? $"Type {typeId}"
+            });
+
+            return Results.Json(new { Watchlist = watchlistPayload, Opportunities = payload });
         });
 
         web.MapPost("/api/watchlist", async (HttpContext context) =>
@@ -211,7 +232,10 @@ internal sealed class MagentApp(ILoggerFactory loggerFactory)
             var latestOrders = db.GetLatestMarketOrders();
             var lines = new List<string>();
 
-            foreach (var typeId in body.TypeIds.Distinct())
+            var selected = body.TypeIds.Distinct().ToList();
+            var typeNames = await ResolveTypeNamesAsync(esi, selected);
+
+            foreach (var typeId in selected)
             {
                 var orders = latestOrders.Where(x => x.TypeId == typeId).ToList();
                 if (orders.Count == 0)
@@ -219,15 +243,23 @@ internal sealed class MagentApp(ILoggerFactory loggerFactory)
                     continue;
                 }
 
+                var name = typeNames.GetValueOrDefault(typeId) ?? $"Type {typeId}";
+                var quantity = Math.Max(body.QuantityPerItem ?? 1, 1);
+                if (string.Equals(body.Format, "eve-multibuy", StringComparison.OrdinalIgnoreCase))
+                {
+                    lines.Add($"{name}\t{quantity}");
+                    continue;
+                }
+
                 if (string.Equals(body.Side, "buy", StringComparison.OrdinalIgnoreCase))
                 {
                     var bestPrice = orders.Where(x => !x.IsBuyOrder).Select(x => x.Price).DefaultIfEmpty(0m).Min();
-                    lines.Add($"BUY type_id={typeId} price={bestPrice:0.00}");
+                    lines.Add($"BUY\t{name}\t{typeId}\t{bestPrice:0.00}\t{quantity}");
                 }
                 else
                 {
                     var bestPrice = orders.Where(x => x.IsBuyOrder).Select(x => x.Price).DefaultIfEmpty(0m).Max();
-                    lines.Add($"SELL type_id={typeId} price={bestPrice:0.00}");
+                    lines.Add($"SELL\t{name}\t{typeId}\t{bestPrice:0.00}\t{quantity}");
                 }
             }
 
@@ -447,7 +479,9 @@ internal sealed class MagentApp(ILoggerFactory loggerFactory)
 
     private sealed record ExportRequest(
         [property: JsonPropertyName("side")] string Side,
-        [property: JsonPropertyName("typeIds")] IReadOnlyList<int> TypeIds);
+        [property: JsonPropertyName("typeIds")] IReadOnlyList<int> TypeIds,
+        [property: JsonPropertyName("format")] string? Format,
+        [property: JsonPropertyName("quantityPerItem")] int? QuantityPerItem);
 
     private const string WebDashboardHtml = """
 <!doctype html>
@@ -459,11 +493,19 @@ internal sealed class MagentApp(ILoggerFactory loggerFactory)
     body { font-family: Arial, sans-serif; margin: 24px; background: #0f172a; color: #e2e8f0; }
     h1,h2 { margin: 0 0 12px; }
     .panel { background: #111827; border: 1px solid #334155; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
-    input, button { padding: 8px; border-radius: 6px; border: 1px solid #475569; background: #1f2937; color: #e2e8f0; }
+    input, select, button { padding: 8px; border-radius: 6px; border: 1px solid #475569; background: #1f2937; color: #e2e8f0; }
     button { cursor: pointer; margin-left: 6px; }
     table { width: 100%; border-collapse: collapse; }
     th, td { border-bottom: 1px solid #334155; padding: 8px; text-align: left; }
-    .row { display: flex; align-items: center; gap: 8px; }
+    th.sortable { cursor: pointer; }
+    .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .row label { font-size: 12px; color: #94a3b8; }
+    .kind { font-weight: 700; }
+    .confidence-high { color: #22c55e; }
+    .confidence-medium { color: #f59e0b; }
+    .confidence-low { color: #ef4444; }
+    .meta { color: #94a3b8; font-size: 12px; margin-top: 8px; }
+    .pill { border: 1px solid #334155; border-radius: 999px; padding: 3px 8px; font-size: 12px; }
   </style>
 </head>
 <body>
@@ -474,6 +516,7 @@ internal sealed class MagentApp(ILoggerFactory loggerFactory)
       <input id="typeIdInput" type="number" placeholder="Type ID" />
       <button onclick="addWatch()">Add</button>
     </div>
+    <div class="meta">Type IDs are resolved to item names automatically when ESI metadata is available.</div>
     <ul id="watchlist"></ul>
   </div>
   <div class="panel">
@@ -481,31 +524,76 @@ internal sealed class MagentApp(ILoggerFactory loggerFactory)
     <div class="row">
       <button onclick="copyOrders('buy')">Copy Buy Orders</button>
       <button onclick="copyOrders('sell')">Copy Sell Orders</button>
+      <button onclick="copyOrders('buy', 'eve-multibuy')">Copy EVE Multi-Buy</button>
+      <label>Qty <input id="qtyInput" type="number" value="1" min="1" style="width:72px" /></label>
+      <input id="searchInput" placeholder="Filter by name / type id" oninput="applyFilters()" />
+      <select id="kindFilter" onchange="applyFilters()"><option value="">All kinds</option><option value="SEED">SEED</option><option value="UPDATE">UPDATE</option><option value="FLIP">FLIP</option></select>
+      <select id="confidenceFilter" onchange="applyFilters()"><option value="">All confidence</option><option value="High">High</option><option value="Medium">Medium</option><option value="Low">Low</option></select>
     </div>
+    <div class="meta"><span class="pill">Click table headers to sort</span> <span class="pill">Checked rows export only selected items</span></div>
     <table>
-      <thead><tr><th></th><th>Type</th><th>Kind</th><th>Margin %</th><th>Profit ISK</th><th>Confidence</th><th>Best Buy</th><th>Best Sell</th></tr></thead>
+      <thead><tr><th></th><th class="sortable" onclick="setSort('typeName')">Item</th><th class="sortable" onclick="setSort('kind')">Kind</th><th class="sortable" onclick="setSort('netMarginPct')">Margin %</th><th class="sortable" onclick="setSort('estimatedProfitIsk')">Profit ISK</th><th class="sortable" onclick="setSort('confidence')">Confidence</th><th class="sortable" onclick="setSort('bestBuy')">Best Buy</th><th class="sortable" onclick="setSort('bestSell')">Best Sell</th><th class="sortable" onclick="setSort('spread')">Spread</th></tr></thead>
       <tbody id="opps"></tbody>
     </table>
+    <div id="oppsSummary" class="meta"></div>
   </div>
 
 <script>
+let state = { opportunities: [], sortKey: 'estimatedProfitIsk', sortAsc: false };
+
 async function refresh() {
   const data = await fetch('/api/dashboard').then(r => r.json());
   const ul = document.getElementById('watchlist');
   ul.innerHTML = '';
-  data.watchlist.forEach(typeId => {
+  data.watchlist.forEach(w => {
     const li = document.createElement('li');
-    li.innerHTML = `${typeId} <button onclick="removeWatch(${typeId})">Remove</button>`;
+    li.innerHTML = `<strong>${w.typeName}</strong> <span class='meta'>(${w.typeId})</span> <button onclick="removeWatch(${w.typeId})">Remove</button>`;
     ul.appendChild(li);
   });
 
+  state.opportunities = data.opportunities;
+  applyFilters();
+}
+
+function applyFilters() {
   const tbody = document.getElementById('opps');
   tbody.innerHTML = '';
-  data.opportunities.forEach(o => {
+  const search = document.getElementById('searchInput').value.trim().toLowerCase();
+  const kind = document.getElementById('kindFilter').value;
+  const confidence = document.getElementById('confidenceFilter').value;
+
+  const filtered = state.opportunities
+    .filter(o => !kind || o.kind === kind)
+    .filter(o => !confidence || o.confidence === confidence)
+    .filter(o => !search || o.typeName.toLowerCase().includes(search) || String(o.typeId).includes(search));
+
+  const sorted = [...filtered].sort((a, b) => {
+    const k = state.sortKey;
+    const dir = state.sortAsc ? 1 : -1;
+    const av = a[k];
+    const bv = b[k];
+    if (typeof av === 'number' && typeof bv === 'number') return (av - bv) * dir;
+    return String(av).localeCompare(String(bv)) * dir;
+  });
+
+  sorted.forEach(o => {
+    const confidenceClass = `confidence-${o.confidence.toLowerCase()}`;
     const tr = document.createElement('tr');
-    tr.innerHTML = `<td><input type='checkbox' class='sel' value='${o.typeId}'></td><td>${o.typeId}</td><td>${o.kind}</td><td>${o.netMarginPct}</td><td>${o.estimatedProfitIsk}</td><td>${o.confidence}</td><td>${o.bestBuy}</td><td>${o.bestSell}</td>`;
+    tr.innerHTML = `<td><input type='checkbox' class='sel' value='${o.typeId}'></td><td><strong>${o.typeName}</strong><div class='meta'>${o.typeId}</div></td><td class='kind'>${o.kind}</td><td>${Number(o.netMarginPct).toFixed(2)}</td><td>${Number(o.estimatedProfitIsk).toLocaleString()}</td><td class='${confidenceClass}'>${o.confidence}</td><td>${Number(o.bestBuy).toFixed(2)}</td><td>${Number(o.bestSell).toFixed(2)}</td><td>${Number(o.spread).toFixed(2)}</td>`;
     tbody.appendChild(tr);
   });
+
+  document.getElementById('oppsSummary').textContent = `${sorted.length} shown / ${state.opportunities.length} total opportunities`;
+}
+
+function setSort(key) {
+  if (state.sortKey === key) {
+    state.sortAsc = !state.sortAsc;
+  } else {
+    state.sortKey = key;
+    state.sortAsc = false;
+  }
+  applyFilters();
 }
 
 async function addWatch() {
@@ -519,9 +607,13 @@ async function removeWatch(typeId) {
   await refresh();
 }
 
-async function copyOrders(side) {
-  const typeIds = Array.from(document.querySelectorAll('.sel:checked')).map(x => Number(x.value));
-  const payload = await fetch('/api/export', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ side, typeIds }) }).then(r => r.json());
+async function copyOrders(side, format = 'tabular') {
+  let typeIds = Array.from(document.querySelectorAll('.sel:checked')).map(x => Number(x.value));
+  if (typeIds.length === 0) {
+    typeIds = Array.from(document.querySelectorAll('#opps .sel')).map(x => Number(x.value));
+  }
+  const quantityPerItem = Number(document.getElementById('qtyInput').value) || 1;
+  const payload = await fetch('/api/export', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ side, typeIds, format, quantityPerItem }) }).then(r => r.json());
   await navigator.clipboard.writeText(payload.clipboard || '');
   alert('Copied to clipboard');
 }
