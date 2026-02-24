@@ -47,9 +47,17 @@ Run from repository root:
     - `watchlist`
 
 - `magent auth`
-  - MVP local token bootstrap flow. Expects/updates local secure token storage file:
+  - Prompts for an ESI refresh token, verifies it with ESI OAuth verify endpoint, then stores it in:
     - `~/.magent/refresh_token.txt`
+  - On Linux/macOS, token file permissions are tightened to user read/write only.
   - Never logs token content.
+
+### ESI OAuth requirement
+Set `MAGENT_ESI_CLIENT_ID` before running commands that call authenticated ESI APIs (`auth`, `sync`, `run`, `report` wallet enrichment):
+
+```bash
+export MAGENT_ESI_CLIENT_ID=your_esi_application_client_id
+```
 
 - `magent sync`
   - Pulls character orders

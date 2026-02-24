@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Text;
@@ -10,27 +11,28 @@ namespace Magent.Esi;
 public sealed class EsiClient(HttpClient httpClient, ILogger<EsiClient> logger) : IEsiClient
 {
     private readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web);
+    private AccessTokenState? _cachedToken;
+    private readonly SemaphoreSlim _tokenLock = new(1, 1);
 
     public async Task<EsiAuthResult> AuthorizeAsync(Uri callbackBaseUri, CancellationToken cancellationToken)
     {
-        // MVP placeholder for device/manual flow bootstrap.
-        var file = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".magent", "refresh_token.txt");
-        if (!File.Exists(file))
+        Console.Write("Paste ESI refresh token: ");
+        var refreshToken = Console.ReadLine()?.Trim();
+        if (string.IsNullOrWhiteSpace(refreshToken))
         {
-            throw new InvalidOperationException($"No token found. Put a refresh token in {file} after completing ESI OAuth.");
+            throw new InvalidOperationException("Refresh token cannot be empty.");
         }
 
-        var token = (await File.ReadAllTextAsync(file, cancellationToken)).Trim();
-        return new EsiAuthResult("Unknown", 0, token, DateTimeOffset.UtcNow);
+        var verify = await VerifyCharacterAsync(refreshToken, cancellationToken);
+        return new EsiAuthResult(verify.CharacterName, verify.CharacterId, refreshToken, DateTimeOffset.UtcNow);
     }
 
     public async Task<IReadOnlyList<CharacterOrder>> GetCharacterOrdersAsync(string refreshToken, CancellationToken cancellationToken)
     {
-        // Stub endpoint shape; token never logged.
-        using var req = new HttpRequestMessage(HttpMethod.Get, "https://esi.evetech.net/latest/characters/0/orders/");
-        req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", refreshToken);
-        var response = await SendWithRetryAsync(req, cancellationToken);
-        if (response.StatusCode == HttpStatusCode.NotFound)
+        var verify = await VerifyCharacterAsync(refreshToken, cancellationToken);
+        using var req = await CreateAuthorizedRequestAsync(HttpMethod.Get, $"https://esi.evetech.net/latest/characters/{verify.CharacterId}/orders/", refreshToken, cancellationToken);
+        using var response = await SendWithRetryAsync(req, cancellationToken);
+        if (response.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.Forbidden)
         {
             return [];
         }
@@ -41,9 +43,9 @@ public sealed class EsiClient(HttpClient httpClient, ILogger<EsiClient> logger) 
             var raw = JsonSerializer.Deserialize<List<EsiOrder>>(payload, _jsonOptions) ?? [];
             return raw.Select(x => new CharacterOrder(x.order_id, x.type_id, x.is_buy_order, x.price, x.volume_remain, x.location_id, x.issued, x.issued.AddDays(x.duration))).ToList();
         }
-        catch
+        catch (JsonException ex)
         {
-            logger.LogWarning("Failed to parse character orders; returning empty dataset.");
+            logger.LogWarning(ex, "Failed to parse character orders; returning empty dataset.");
             return [];
         }
     }
@@ -56,7 +58,7 @@ public sealed class EsiClient(HttpClient httpClient, ILogger<EsiClient> logger) 
             req.Headers.IfNoneMatch.Add(new EntityTagHeaderValue(etag));
         }
 
-        var response = await SendWithRetryAsync(req, cancellationToken);
+        using var response = await SendWithRetryAsync(req, cancellationToken);
         if (response.StatusCode == HttpStatusCode.NotModified)
         {
             return [];
@@ -75,7 +77,7 @@ public sealed class EsiClient(HttpClient httpClient, ILogger<EsiClient> logger) 
             req.Headers.IfNoneMatch.Add(new EntityTagHeaderValue(etag));
         }
 
-        var response = await SendWithRetryAsync(req, cancellationToken);
+        using var response = await SendWithRetryAsync(req, cancellationToken);
         if (response.StatusCode == HttpStatusCode.NotModified)
         {
             return [];
@@ -88,11 +90,70 @@ public sealed class EsiClient(HttpClient httpClient, ILogger<EsiClient> logger) 
 
     public async Task<decimal> GetWalletBalanceAsync(string refreshToken, CancellationToken cancellationToken)
     {
-        using var req = new HttpRequestMessage(HttpMethod.Get, "https://esi.evetech.net/latest/characters/0/wallet/");
-        req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", refreshToken);
-        var response = await SendWithRetryAsync(req, cancellationToken);
+        var verify = await VerifyCharacterAsync(refreshToken, cancellationToken);
+        using var req = await CreateAuthorizedRequestAsync(HttpMethod.Get, $"https://esi.evetech.net/latest/characters/{verify.CharacterId}/wallet/", refreshToken, cancellationToken);
+        using var response = await SendWithRetryAsync(req, cancellationToken);
         var payload = await response.Content.ReadAsStringAsync(cancellationToken);
-        return decimal.TryParse(payload, out var result) ? result : 0;
+        return decimal.TryParse(payload, CultureInfo.InvariantCulture, out var result) ? result : 0;
+    }
+
+    private async Task<VerifiedCharacter> VerifyCharacterAsync(string refreshToken, CancellationToken cancellationToken)
+    {
+        using var req = await CreateAuthorizedRequestAsync(HttpMethod.Get, "https://login.eveonline.com/oauth/verify", refreshToken, cancellationToken);
+        using var response = await SendWithRetryAsync(req, cancellationToken);
+        var payload = await response.Content.ReadAsStringAsync(cancellationToken);
+        var verify = JsonSerializer.Deserialize<EsiVerifyResponse>(payload, _jsonOptions)
+                     ?? throw new InvalidOperationException("Unable to parse ESI verify response.");
+        return new VerifiedCharacter(verify.CharacterID, verify.CharacterName ?? "Unknown");
+    }
+
+    private async Task<HttpRequestMessage> CreateAuthorizedRequestAsync(HttpMethod method, string uri, string refreshToken, CancellationToken cancellationToken)
+    {
+        var accessToken = await GetAccessTokenAsync(refreshToken, cancellationToken);
+        var req = new HttpRequestMessage(method, uri);
+        req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+        return req;
+    }
+
+    private async Task<string> GetAccessTokenAsync(string refreshToken, CancellationToken cancellationToken)
+    {
+        await _tokenLock.WaitAsync(cancellationToken);
+        try
+        {
+            if (_cachedToken is not null && _cachedToken.ExpiresAt > DateTimeOffset.UtcNow.AddMinutes(1) && _cachedToken.RefreshToken == refreshToken)
+            {
+                return _cachedToken.AccessToken;
+            }
+
+            using var req = new HttpRequestMessage(HttpMethod.Post, "https://login.eveonline.com/v2/oauth/token");
+            req.Content = new FormUrlEncodedContent(new Dictionary<string, string>
+            {
+                ["grant_type"] = "refresh_token",
+                ["refresh_token"] = refreshToken
+            });
+
+            var clientId = Environment.GetEnvironmentVariable("MAGENT_ESI_CLIENT_ID");
+            if (string.IsNullOrWhiteSpace(clientId))
+            {
+                throw new InvalidOperationException("MAGENT_ESI_CLIENT_ID is required to exchange refresh tokens for access tokens.");
+            }
+
+            req.Headers.Authorization = new AuthenticationHeaderValue(
+                "Basic",
+                Convert.ToBase64String(Encoding.UTF8.GetBytes($"{clientId}:")));
+
+            using var response = await SendWithRetryAsync(req, cancellationToken);
+            var payload = await response.Content.ReadAsStringAsync(cancellationToken);
+            var token = JsonSerializer.Deserialize<EsiTokenResponse>(payload, _jsonOptions)
+                        ?? throw new InvalidOperationException("Unable to parse ESI token response.");
+
+            _cachedToken = new AccessTokenState(token.access_token, DateTimeOffset.UtcNow.AddSeconds(Math.Max(30, token.expires_in)), refreshToken);
+            return _cachedToken.AccessToken;
+        }
+        finally
+        {
+            _tokenLock.Release();
+        }
     }
 
     private async Task<HttpResponseMessage> SendWithRetryAsync(HttpRequestMessage req, CancellationToken cancellationToken)
@@ -106,16 +167,13 @@ public sealed class EsiClient(HttpClient httpClient, ILogger<EsiClient> logger) 
                 return response;
             }
 
-            var delay = TimeSpan.FromSeconds(Math.Pow(2, attempt));
+            var delay = response.Headers.RetryAfter?.Delta ?? TimeSpan.FromSeconds(Math.Pow(2, attempt));
+            response.Dispose();
             logger.LogWarning("ESI transient error {StatusCode}, retrying in {DelaySeconds}s", (int)response.StatusCode, delay.TotalSeconds);
             await Task.Delay(delay, cancellationToken);
         }
 
-        logger.LogWarning("ESI request exhausted retries; returning synthetic 503 response.");
-        return new HttpResponseMessage(HttpStatusCode.ServiceUnavailable)
-        {
-            Content = new StringContent("[]", Encoding.UTF8, "application/json")
-        };
+        throw new HttpRequestException("ESI request failed after retries.");
     }
 
     private static async Task<HttpRequestMessage> CloneAsync(HttpRequestMessage req, CancellationToken cancellationToken)
@@ -139,6 +197,10 @@ public sealed class EsiClient(HttpClient httpClient, ILogger<EsiClient> logger) 
         return clone;
     }
 
+    private sealed record AccessTokenState(string AccessToken, DateTimeOffset ExpiresAt, string RefreshToken);
+    private sealed record VerifiedCharacter(long CharacterId, string CharacterName);
     private sealed record EsiOrder(long order_id, int type_id, bool is_buy_order, decimal price, int volume_remain, long location_id, int duration, DateTimeOffset issued);
     private sealed record EsiHistory(DateTime date, long volume, decimal average);
+    private sealed record EsiTokenResponse(string access_token, int expires_in, string token_type);
+    private sealed record EsiVerifyResponse(long CharacterID, string CharacterName);
 }
