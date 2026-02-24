@@ -116,6 +116,11 @@ public sealed class EsiClient(HttpClient httpClient, ILogger<EsiClient> logger) 
         var accessToken = await GetAccessTokenAsync(refreshToken, cancellationToken);
         var req = new HttpRequestMessage(method, uri);
         req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+        logger.LogInformation(
+            "ESI authorized request prepared: {Method} {Uri} headers=[Authorization: {AuthorizationHeader}]",
+            method,
+            uri,
+            "Bearer <redacted>");
         return req;
     }
 
@@ -143,10 +148,22 @@ public sealed class EsiClient(HttpClient httpClient, ILogger<EsiClient> logger) 
             }
 
             var clientSecret = Environment.GetEnvironmentVariable("MAGENT_ESI_CLIENT_SECRET") ?? string.Empty;
+            var basicAuth = Convert.ToBase64String(Encoding.UTF8.GetBytes($"{clientId}:{clientSecret}"));
+
+            logger.LogInformation(
+                "Starting ESI token exchange. endpoint={Endpoint} clientId={ClientId} clientSecret={ClientSecretSummary} form=[grant_type: refresh_token, refresh_token: {RefreshTokenSummary}]",
+                "https://login.eveonline.com/v2/oauth/token",
+                clientId,
+                SummarizeSecret(clientSecret),
+                SummarizeSecret(refreshToken));
 
             req.Headers.Authorization = new AuthenticationHeaderValue(
                 "Basic",
-                Convert.ToBase64String(Encoding.UTF8.GetBytes($"{clientId}:{clientSecret}")));
+                basicAuth);
+
+            logger.LogInformation(
+                "ESI token request headers=[Authorization: Basic {BasicAuthSummary}]",
+                SummarizeSecret(basicAuth));
 
             using var response = await SendWithRetryAsync(req, cancellationToken);
             var payload = await response.Content.ReadAsStringAsync(cancellationToken);
@@ -159,6 +176,11 @@ public sealed class EsiClient(HttpClient httpClient, ILogger<EsiClient> logger) 
 
             var token = JsonSerializer.Deserialize<EsiTokenResponse>(payload, JsonCaseInsensitiveOptions)
                         ?? throw new InvalidOperationException("Unable to parse ESI token response.");
+
+            logger.LogInformation(
+                "ESI token exchange succeeded. tokenType={TokenType} expiresInSeconds={ExpiresIn}",
+                token.token_type,
+                token.expires_in);
 
             _cachedToken = new AccessTokenState(token.access_token, DateTimeOffset.UtcNow.AddSeconds(Math.Max(30, token.expires_in)), refreshToken);
             return _cachedToken.AccessToken;
@@ -208,6 +230,16 @@ public sealed class EsiClient(HttpClient httpClient, ILogger<EsiClient> logger) 
         }
 
         return clone;
+    }
+
+    private static string SummarizeSecret(string value)
+    {
+        if (string.IsNullOrEmpty(value))
+        {
+            return "<empty>";
+        }
+
+        return $"<redacted len={value.Length}>";
     }
 
     private sealed record AccessTokenState(string AccessToken, DateTimeOffset ExpiresAt, string RefreshToken);
