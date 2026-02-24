@@ -45,7 +45,7 @@ public static class ReportRenderer
             .Replace(">", "&gt;")
             .Replace("\n", "<br/>");
 
-        return $"""
+        return """
 <!doctype html>
 <html>
 <head>
