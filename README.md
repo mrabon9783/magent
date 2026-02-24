@@ -53,10 +53,12 @@ Run from repository root:
   - Never logs token content.
 
 ### ESI OAuth requirement
-Set `MAGENT_ESI_CLIENT_ID` before running commands that call authenticated ESI APIs (`auth`, `sync`, `run`, `report` wallet enrichment):
+Set `MAGENT_ESI_CLIENT_ID` before running commands that call authenticated ESI APIs (`auth`, `sync`, `run`, `report` wallet enrichment).
+If your ESI app is configured as a confidential client, also set `MAGENT_ESI_CLIENT_SECRET`:
 
 ```bash
 export MAGENT_ESI_CLIENT_ID=your_esi_application_client_id
+export MAGENT_ESI_CLIENT_SECRET=your_esi_application_client_secret
 ```
 
 - `magent sync`
