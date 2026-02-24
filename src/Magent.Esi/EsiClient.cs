@@ -101,6 +101,20 @@ public sealed class EsiClient(HttpClient httpClient, ILogger<EsiClient> logger) 
         return decimal.TryParse(payload, CultureInfo.InvariantCulture, out var result) ? result : 0;
     }
 
+    public async Task<string?> GetTypeNameAsync(int typeId, CancellationToken cancellationToken)
+    {
+        using var req = new HttpRequestMessage(HttpMethod.Get, $"https://esi.evetech.net/latest/universe/types/{typeId}/");
+        using var response = await SendWithRetryAsync(req, cancellationToken);
+        if (response.StatusCode == HttpStatusCode.NotFound)
+        {
+            return null;
+        }
+
+        var payload = await response.Content.ReadAsStringAsync(cancellationToken);
+        var type = JsonSerializer.Deserialize<EsiTypeResponse>(payload, _jsonOptions);
+        return type?.name;
+    }
+
     private async Task<VerifiedCharacter> VerifyCharacterAsync(string refreshToken, CancellationToken cancellationToken)
     {
         using var req = await CreateAuthorizedRequestAsync(HttpMethod.Get, "https://login.eveonline.com/oauth/verify", refreshToken, cancellationToken);
@@ -248,4 +262,5 @@ public sealed class EsiClient(HttpClient httpClient, ILogger<EsiClient> logger) 
     private sealed record EsiHistory(DateTime date, long volume, decimal average);
     private sealed record EsiTokenResponse(string access_token, int expires_in, string token_type);
     private sealed record EsiVerifyResponse(long CharacterID, string CharacterName);
+    private sealed record EsiTypeResponse(int type_id, string name);
 }

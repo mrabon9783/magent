@@ -9,4 +9,5 @@ public interface IEsiClient
     Task<IReadOnlyList<MarketOrder>> GetMarketOrdersAsync(int regionId, int typeId, string? etag, CancellationToken cancellationToken);
     Task<IReadOnlyList<MarketHistoryPoint>> GetMarketHistoryAsync(int regionId, int typeId, string? etag, CancellationToken cancellationToken);
     Task<decimal> GetWalletBalanceAsync(string refreshToken, CancellationToken cancellationToken);
+    Task<string?> GetTypeNameAsync(int typeId, CancellationToken cancellationToken);
 }
