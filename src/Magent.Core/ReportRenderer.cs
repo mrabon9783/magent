@@ -48,7 +48,8 @@ public static class ReportRenderer
     public static string ToHtml(RadarSnapshot snapshot)
     {
         var sb = new StringBuilder();
-        sb.Append("""
+        sb.Append(
+"""
 <!doctype html>
 <html>
 <head>
@@ -145,9 +146,12 @@ ul { margin: 0; padding-left: 1.25rem; }
 <main class="layout">
   <header>
     <h1>Amarr Station Trading Radar</h1>
-    <p class="muted">Generated at """);
+    <p class="muted">Generated at 
+"""
+    );
         sb.Append(Escape(snapshot.Timestamp.ToString("u")));
-        sb.AppendLine("""</p>
+        sb.AppendLine("""
+        </p>
   </header>
 """);
 
@@ -216,7 +220,7 @@ ul { margin: 0; padding-left: 1.25rem; }
 </main>
 </body>
 </html>
-""";
+""");
 
         return sb.ToString();
     }
@@ -235,7 +239,8 @@ ul { margin: 0; padding-left: 1.25rem; }
         var items = opportunities.ToList();
         sb.Append("""
   <section class="section">
-    <div class="section-header"><h2>""");
+    <div class="section-header"><h2>
+  """);
         sb.Append(Escape(title));
         sb.AppendLine("</h2></div>");
         sb.AppendLine("    <div class=\"section-body\">");
