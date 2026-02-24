@@ -1,4 +1,5 @@
 using Magent.Core;
+using Xunit;
 
 namespace Magent.Core.Tests;
 
