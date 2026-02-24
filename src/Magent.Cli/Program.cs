@@ -4,6 +4,8 @@ using System.Text.Json.Serialization;
 using Magent.Core;
 using Magent.Data;
 using Magent.Esi;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
 
 var loggerFactory = LoggerFactory.Create(builder => builder.AddSimpleConsole(options =>
@@ -22,12 +24,13 @@ return command switch
     "sync" => await app.SyncAsync(),
     "run" => await app.RunAsync(),
     "report" => await app.ReportAsync(),
+    "serve" => await app.ServeAsync(),
     _ => PrintHelp(logger)
 };
 
 static int PrintHelp(ILogger logger)
 {
-    logger.LogInformation("Commands: magent init | auth | sync | run | report");
+    logger.LogInformation("Commands: magent init | auth | sync | run | report | serve");
     return 0;
 }
 
@@ -124,6 +127,115 @@ internal sealed class MagentApp(ILoggerFactory loggerFactory)
     {
         var config = LoadConfig();
         await GenerateReportAndAlertsAsync(config, dedupeAlerts: false);
+        return 0;
+    }
+
+    public async Task<int> ServeAsync()
+    {
+        var db = CreateStore();
+        db.Initialize();
+
+        var builder = WebApplication.CreateBuilder();
+        builder.Logging.ClearProviders();
+        builder.Logging.AddSimpleConsole(options => options.TimestampFormat = "yyyy-MM-dd HH:mm:ss ");
+
+        var web = builder.Build();
+        web.MapGet("/", () => Results.Content(WebDashboardHtml, "text/html"));
+
+        web.MapGet("/api/dashboard", () =>
+        {
+            var watchlist = db.GetWatchlist();
+            var latestOrders = db.GetLatestMarketOrders();
+            var opportunities = db.GetLatestOpportunities(100)
+                .GroupBy(x => x.Fingerprint)
+                .Select(x => x.First())
+                .OrderByDescending(x => x.DetectedAt)
+                .ToList();
+
+            var bestPrices = latestOrders
+                .GroupBy(x => x.TypeId)
+                .ToDictionary(
+                    x => x.Key,
+                    x => new
+                    {
+                        BestBuy = x.Where(o => !o.IsBuyOrder).Select(o => o.Price).DefaultIfEmpty(0m).Min(),
+                        BestSell = x.Where(o => o.IsBuyOrder).Select(o => o.Price).DefaultIfEmpty(0m).Max()
+                    });
+
+            var payload = opportunities.Select(item => new
+            {
+                item.Fingerprint,
+                item.TypeId,
+                Kind = item.Kind.ToString(),
+                item.NetMarginPct,
+                item.EstimatedProfitIsk,
+                Confidence = item.Confidence.ToString(),
+                item.DetectedAt,
+                BestBuy = bestPrices.GetValueOrDefault(item.TypeId)?.BestBuy ?? 0m,
+                BestSell = bestPrices.GetValueOrDefault(item.TypeId)?.BestSell ?? 0m
+            });
+
+            return Results.Json(new { Watchlist = watchlist, Opportunities = payload });
+        });
+
+        web.MapPost("/api/watchlist", async (HttpContext context) =>
+        {
+            var body = await context.Request.ReadFromJsonAsync<WatchlistUpdateRequest>();
+            if (body is null || body.TypeId <= 0)
+            {
+                return Results.BadRequest(new { error = "typeId must be a positive integer." });
+            }
+
+            db.AddWatchItem(body.TypeId);
+            return Results.Ok(new { body.TypeId });
+        });
+
+        web.MapDelete("/api/watchlist/{typeId:int}", (int typeId) =>
+        {
+            if (typeId <= 0)
+            {
+                return Results.BadRequest(new { error = "typeId must be a positive integer." });
+            }
+
+            return db.RemoveWatchItem(typeId) ? Results.Ok() : Results.NotFound();
+        });
+
+        web.MapPost("/api/export", async (HttpContext context) =>
+        {
+            var body = await context.Request.ReadFromJsonAsync<ExportRequest>();
+            if (body is null || body.TypeIds.Count == 0)
+            {
+                return Results.BadRequest(new { error = "Provide at least one typeId." });
+            }
+
+            var latestOrders = db.GetLatestMarketOrders();
+            var lines = new List<string>();
+
+            foreach (var typeId in body.TypeIds.Distinct())
+            {
+                var orders = latestOrders.Where(x => x.TypeId == typeId).ToList();
+                if (orders.Count == 0)
+                {
+                    continue;
+                }
+
+                if (string.Equals(body.Side, "buy", StringComparison.OrdinalIgnoreCase))
+                {
+                    var bestPrice = orders.Where(x => !x.IsBuyOrder).Select(x => x.Price).DefaultIfEmpty(0m).Min();
+                    lines.Add($"BUY type_id={typeId} price={bestPrice:0.00}");
+                }
+                else
+                {
+                    var bestPrice = orders.Where(x => x.IsBuyOrder).Select(x => x.Price).DefaultIfEmpty(0m).Max();
+                    lines.Add($"SELL type_id={typeId} price={bestPrice:0.00}");
+                }
+            }
+
+            return Results.Json(new { Clipboard = string.Join(Environment.NewLine, lines) });
+        });
+
+        _logger.LogInformation("Dashboard available at http://localhost:5000");
+        await web.RunAsync("http://0.0.0.0:5000");
         return 0;
     }
 
@@ -330,6 +442,96 @@ internal sealed class MagentApp(ILoggerFactory loggerFactory)
         [property: JsonPropertyName("dailyVolume")] long DailyVolume,
         [property: JsonPropertyName("confidence")] ConfidenceLevel Confidence,
         [property: JsonPropertyName("detectedAt")] DateTimeOffset DetectedAt);
+
+    private sealed record WatchlistUpdateRequest([property: JsonPropertyName("typeId")] int TypeId);
+
+    private sealed record ExportRequest(
+        [property: JsonPropertyName("side")] string Side,
+        [property: JsonPropertyName("typeIds")] IReadOnlyList<int> TypeIds);
+
+    private const string WebDashboardHtml = """
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Magent Live Dashboard</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 24px; background: #0f172a; color: #e2e8f0; }
+    h1,h2 { margin: 0 0 12px; }
+    .panel { background: #111827; border: 1px solid #334155; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+    input, button { padding: 8px; border-radius: 6px; border: 1px solid #475569; background: #1f2937; color: #e2e8f0; }
+    button { cursor: pointer; margin-left: 6px; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { border-bottom: 1px solid #334155; padding: 8px; text-align: left; }
+    .row { display: flex; align-items: center; gap: 8px; }
+  </style>
+</head>
+<body>
+  <h1>Magent Live Dashboard</h1>
+  <div class="panel">
+    <h2>Watchlist</h2>
+    <div class="row">
+      <input id="typeIdInput" type="number" placeholder="Type ID" />
+      <button onclick="addWatch()">Add</button>
+    </div>
+    <ul id="watchlist"></ul>
+  </div>
+  <div class="panel">
+    <h2>Opportunities</h2>
+    <div class="row">
+      <button onclick="copyOrders('buy')">Copy Buy Orders</button>
+      <button onclick="copyOrders('sell')">Copy Sell Orders</button>
+    </div>
+    <table>
+      <thead><tr><th></th><th>Type</th><th>Kind</th><th>Margin %</th><th>Profit ISK</th><th>Confidence</th><th>Best Buy</th><th>Best Sell</th></tr></thead>
+      <tbody id="opps"></tbody>
+    </table>
+  </div>
+
+<script>
+async function refresh() {
+  const data = await fetch('/api/dashboard').then(r => r.json());
+  const ul = document.getElementById('watchlist');
+  ul.innerHTML = '';
+  data.watchlist.forEach(typeId => {
+    const li = document.createElement('li');
+    li.innerHTML = `${typeId} <button onclick="removeWatch(${typeId})">Remove</button>`;
+    ul.appendChild(li);
+  });
+
+  const tbody = document.getElementById('opps');
+  tbody.innerHTML = '';
+  data.opportunities.forEach(o => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td><input type='checkbox' class='sel' value='${o.typeId}'></td><td>${o.typeId}</td><td>${o.kind}</td><td>${o.netMarginPct}</td><td>${o.estimatedProfitIsk}</td><td>${o.confidence}</td><td>${o.bestBuy}</td><td>${o.bestSell}</td>`;
+    tbody.appendChild(tr);
+  });
+}
+
+async function addWatch() {
+  const typeId = Number(document.getElementById('typeIdInput').value);
+  await fetch('/api/watchlist', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ typeId }) });
+  await refresh();
+}
+
+async function removeWatch(typeId) {
+  await fetch(`/api/watchlist/${typeId}`, { method: 'DELETE' });
+  await refresh();
+}
+
+async function copyOrders(side) {
+  const typeIds = Array.from(document.querySelectorAll('.sel:checked')).map(x => Number(x.value));
+  const payload = await fetch('/api/export', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ side, typeIds }) }).then(r => r.json());
+  await navigator.clipboard.writeText(payload.clipboard || '');
+  alert('Copied to clipboard');
+}
+
+refresh();
+setInterval(refresh, 15000);
+</script>
+</body>
+</html>
+""";
 
     private sealed class TokenStore(ILogger<TokenStore> logger)
     {

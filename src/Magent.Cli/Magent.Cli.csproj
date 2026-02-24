@@ -9,6 +9,9 @@
     <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="8.0.1" />
   </ItemGroup>
   <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+  <ItemGroup>
     <ProjectReference Include="../Magent.Core/Magent.Core.csproj" />
     <ProjectReference Include="../Magent.Data/Magent.Data.csproj" />
     <ProjectReference Include="../Magent.Esi/Magent.Esi.csproj" />

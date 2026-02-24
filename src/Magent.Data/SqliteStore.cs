@@ -156,6 +156,40 @@ CREATE TABLE IF NOT EXISTS recommendation_outcomes (
         return ids;
     }
 
+    public IReadOnlyList<int> GetWatchlist()
+    {
+        using var connection = Open();
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = "SELECT type_id FROM watchlist ORDER BY last_seen_at DESC;";
+        using var reader = cmd.ExecuteReader();
+        var ids = new List<int>();
+        while (reader.Read())
+        {
+            ids.Add(reader.GetInt32(0));
+        }
+
+        return ids;
+    }
+
+    public void AddWatchItem(int typeId)
+    {
+        using var connection = Open();
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = "INSERT INTO watchlist(type_id,last_seen_at) VALUES($type,$seen) ON CONFLICT(type_id) DO UPDATE SET last_seen_at=excluded.last_seen_at;";
+        cmd.Parameters.AddWithValue("$type", typeId);
+        cmd.Parameters.AddWithValue("$seen", DateTimeOffset.UtcNow.ToString("O"));
+        cmd.ExecuteNonQuery();
+    }
+
+    public bool RemoveWatchItem(int typeId)
+    {
+        using var connection = Open();
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = "DELETE FROM watchlist WHERE type_id=$type;";
+        cmd.Parameters.AddWithValue("$type", typeId);
+        return cmd.ExecuteNonQuery() > 0;
+    }
+
     public void SaveOrderbookSnapshot(int typeId, IReadOnlyList<MarketOrder> orders)
     {
         using var connection = Open();
@@ -204,6 +238,30 @@ CREATE TABLE IF NOT EXISTS recommendation_outcomes (
         }
 
         tx.Commit();
+    }
+
+    public IReadOnlyList<Opportunity> GetLatestOpportunities(int maxCount)
+    {
+        using var connection = Open();
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = "SELECT kind,type_id,net_margin_pct,estimated_profit_isk,confidence,notes,detected_at,fingerprint FROM opportunities ORDER BY id DESC LIMIT $max;";
+        cmd.Parameters.AddWithValue("$max", maxCount);
+        using var reader = cmd.ExecuteReader();
+        var items = new List<Opportunity>();
+        while (reader.Read())
+        {
+            var kind = Enum.Parse<OpportunityKind>(reader.GetString(0), ignoreCase: true);
+            var typeId = reader.GetInt32(1);
+            var netMargin = reader.GetDecimal(2);
+            var estimatedProfit = reader.GetDecimal(3);
+            var confidence = Enum.Parse<ConfidenceLevel>(reader.GetString(4), ignoreCase: true);
+            var notes = reader.GetString(5);
+            var detectedAt = DateTimeOffset.Parse(reader.GetString(6));
+            var fingerprint = reader.GetString(7);
+            items.Add(new Opportunity(kind, typeId, $"{kind} type {typeId}", notes, netMargin, estimatedProfit, 0m, 0m, 0L, 0, 0m, confidence, detectedAt, fingerprint));
+        }
+
+        return items;
     }
 
     public bool TryMarkAlertSent(string fingerprint)
