@@ -11,6 +11,10 @@ namespace Magent.Esi;
 public sealed class EsiClient(HttpClient httpClient, ILogger<EsiClient> logger) : IEsiClient
 {
     private readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web);
+    private static readonly JsonSerializerOptions JsonCaseInsensitiveOptions = new(JsonSerializerDefaults.Web)
+    {
+        PropertyNameCaseInsensitive = true
+    };
     private AccessTokenState? _cachedToken;
     private readonly SemaphoreSlim _tokenLock = new(1, 1);
 
@@ -138,13 +142,22 @@ public sealed class EsiClient(HttpClient httpClient, ILogger<EsiClient> logger) 
                 throw new InvalidOperationException("MAGENT_ESI_CLIENT_ID is required to exchange refresh tokens for access tokens.");
             }
 
+            var clientSecret = Environment.GetEnvironmentVariable("MAGENT_ESI_CLIENT_SECRET") ?? string.Empty;
+
             req.Headers.Authorization = new AuthenticationHeaderValue(
                 "Basic",
-                Convert.ToBase64String(Encoding.UTF8.GetBytes($"{clientId}:")));
+                Convert.ToBase64String(Encoding.UTF8.GetBytes($"{clientId}:{clientSecret}")));
 
             using var response = await SendWithRetryAsync(req, cancellationToken);
             var payload = await response.Content.ReadAsStringAsync(cancellationToken);
-            var token = JsonSerializer.Deserialize<EsiTokenResponse>(payload, _jsonOptions)
+            if (!response.IsSuccessStatusCode)
+            {
+                throw new InvalidOperationException(
+                    $"ESI token exchange failed ({(int)response.StatusCode} {response.ReasonPhrase}). " +
+                    "Verify MAGENT_ESI_CLIENT_ID and (if required) MAGENT_ESI_CLIENT_SECRET are configured correctly.");
+            }
+
+            var token = JsonSerializer.Deserialize<EsiTokenResponse>(payload, JsonCaseInsensitiveOptions)
                         ?? throw new InvalidOperationException("Unable to parse ESI token response.");
 
             _cachedToken = new AccessTokenState(token.access_token, DateTimeOffset.UtcNow.AddSeconds(Math.Max(30, token.expires_in)), refreshToken);
