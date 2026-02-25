@@ -18,7 +18,7 @@ public sealed class IntelTests
     public void PilotThreatScorer_ProducesExpectedBandAndReasons()
     {
         var scorer = new PilotThreatScorer();
-        var intel = new PilotIntel("Hunter", 1, 2, "Bad Corp", 3, "Bad Alliance", -6, 40, 50, 0.8, DateTimeOffset.UtcNow.AddMinutes(-30), true, ["Astero"], []);
+        var intel = new PilotIntel("Hunter", 1, 2, "Bad Corp", 3, "Bad Alliance", -6, 40, 50, 35, 0.8, 94, 90, DateTimeOffset.UtcNow.AddMinutes(-30), true, ["Astero"], []);
         var result = scorer.Score(intel, [new DenylistEntry("corp", "Bad", 15, null)], DateTimeOffset.UtcNow);
         Assert.Equal(ThreatBand.Extreme, result.Band);
         Assert.InRange(result.Score, 80, 100);

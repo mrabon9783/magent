@@ -46,6 +46,17 @@ public sealed class PilotThreatScorer
         var reasons = new List<string>();
 
         var kills = intel.RecentKills7d > 0 ? intel.RecentKills7d : intel.RecentKills30d;
+        if (intel.ActivePvpKills is { } activeKills && activeKills > 0)
+        {
+            if (activeKills >= 30) { score += 20; reasons.Add($"Very active PvP profile ({activeKills} recent active kills)."); }
+            else if (activeKills >= 10) { score += 12; reasons.Add($"Active PvP profile ({activeKills} recent active kills)."); }
+            else { score += 6; reasons.Add($"Some current PvP activity ({activeKills} active kills)."); }
+        }
+        else
+        {
+            reasons.Add("Active PvP summary unavailable.");
+        }
+
         if (kills >= 30) { score += 30; reasons.Add($"Heavy recent PvP activity ({kills} kills)."); }
         else if (kills >= 10) { score += 18; reasons.Add($"Moderate recent PvP activity ({kills} kills)."); }
         else if (kills > 0) { score += 8; reasons.Add($"Some recent PvP activity ({kills} kills)."); }
@@ -70,6 +81,19 @@ public sealed class PilotThreatScorer
         {
             score += 12;
             reasons.Add($"Hunter ships detected ({string.Join(", ", intel.HunterShips.Take(3))}).");
+        }
+
+        if (intel.DangerRatio is { } danger)
+        {
+            if (danger >= 85) { score += 16; reasons.Add($"Very high danger ratio ({danger}%)."); }
+            else if (danger >= 70) { score += 10; reasons.Add($"High danger ratio ({danger}%)."); }
+            else if (danger >= 55) { score += 5; reasons.Add($"Elevated danger ratio ({danger}%)."); }
+        }
+
+        if (intel.GangRatio is { } gang && gang >= 80)
+        {
+            score += 4;
+            reasons.Add($"Frequently operates in gangs ({gang}% gang ratio).");
         }
 
         if (intel.SecurityStatus is { } sec)
