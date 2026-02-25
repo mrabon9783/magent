@@ -27,7 +27,8 @@ public sealed record AppConfig(
     decimal MaxPortfolioExposurePct,
     decimal MinOrderValue,
     int MaxOrdersPerCycle,
-    string? WebhookUrl);
+    string? WebhookUrl,
+    IntelConfig? Intel = null);
 
 public sealed record CharacterOrder(
     long OrderId,
