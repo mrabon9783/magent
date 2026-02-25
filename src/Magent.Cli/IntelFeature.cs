@@ -20,21 +20,96 @@ internal sealed class IntelRunner(ILogger logger, SqliteStore db, IEsiClient esi
         var pilotSource = new CompositePilotIntelSource(esi, logger);
         var systemSource = new EsiSystemIntelSource(esi, logger);
 
-        var scores = new List<PilotThreatScoreResult>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var scores = new Dictionary<string, PilotThreatScoreResult>(StringComparer.OrdinalIgnoreCase);
+
         foreach (var n in names.Distinct(StringComparer.OrdinalIgnoreCase))
         {
-            logger.LogInformation("NEW IN LOCAL: {Pilot}  (intel pending...)", n);
-            var resolved = await ResolvePilotScoreAsync(n, pilotSource, denylist, intelConfig, ct);
-            scores.Add(resolved);
-            PrintPilot(resolved);
+            await ResolveAndPrintPilotAsync(n, pilotSource, denylist, intelConfig, seen, scores, ct);
+        }
+
+        logger.LogInformation("Paste mode active. Monitoring clipboard for pilot names (Ctrl+C to stop).");
+        var lastClipboardText = string.Empty;
+
+        try
+        {
+            while (!ct.IsCancellationRequested)
+            {
+            var clipboardText = await TryReadClipboardTextAsync(ct);
+            var changed = false;
+            if (!string.IsNullOrWhiteSpace(clipboardText) && !string.Equals(lastClipboardText, clipboardText, StringComparison.Ordinal))
+            {
+                foreach (var pilot in ExtractPotentialPilotNames(clipboardText))
+                {
+                    changed |= await ResolveAndPrintPilotAsync(pilot, pilotSource, denylist, intelConfig, seen, scores, ct);
+                }
+
+                lastClipboardText = clipboardText;
+            }
+
+            if (changed)
+            {
+                await RefreshSystemSummaryAsync(systemSource, scores.Values.ToList(), denylist, systemName, writeReport: true, printSummary: true, ct);
+            }
+
+                await Task.Delay(1000, ct);
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            logger.LogInformation("Paste monitoring stopped.");
+        }
+
+        return 0;
+    }
+
+    private async Task<bool> ResolveAndPrintPilotAsync(
+        string pilot,
+        IPilotIntelSource pilotSource,
+        IReadOnlyList<DenylistEntry> denylist,
+        IntelConfig intelConfig,
+        HashSet<string> seen,
+        Dictionary<string, PilotThreatScoreResult> scores,
+        CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(pilot) || !seen.Add(pilot))
+        {
+            return false;
+        }
+
+        logger.LogInformation("NEW IN LOCAL: {Pilot} (intel pending)", pilot);
+        var resolved = await ResolvePilotScoreAsync(pilot, pilotSource, denylist, intelConfig, ct);
+        scores[pilot] = resolved;
+        PrintPilot(resolved);
+        return true;
+    }
+
+    private async Task RefreshSystemSummaryAsync(
+        ISystemIntelSource systemSource,
+        IReadOnlyList<PilotThreatScoreResult> scores,
+        IReadOnlyList<DenylistEntry> denylist,
+        string? systemName,
+        bool writeReport,
+        bool printSummary,
+        CancellationToken ct)
+    {
+        if (scores.Count == 0)
+        {
+            return;
         }
 
         var sysIntel = await systemSource.ResolveSystemAsync(null, systemName, ct);
         var sysScore = _systemScorer.Score(sysIntel, scores, denylist);
         PrintSystem(sysScore, sysIntel.SystemName ?? "Unknown");
-        WriteIntelReport(scores, sysScore, sysIntel.SystemName);
-        PrintSummary(scores, sysIntel.SystemName ?? "Unknown");
-        return 0;
+        if (writeReport)
+        {
+            WriteIntelReport(scores, sysScore, sysIntel.SystemName);
+        }
+
+        if (printSummary)
+        {
+            PrintSummary(scores, sysIntel.SystemName ?? "Unknown");
+        }
     }
 
     public async Task<int> WatchAsync(AppConfig appConfig, string? chatlogPathOverride, CancellationToken ct)
@@ -56,8 +131,10 @@ internal sealed class IntelRunner(ILogger logger, SqliteStore db, IEsiClient esi
         var lastSystemBand = ThreatBand.Low;
         logger.LogInformation("Watching {Path} for local intel.", path);
 
-        while (!ct.IsCancellationRequested)
+        try
         {
+            while (!ct.IsCancellationRequested)
+            {
             var active = SelectActiveLocalFile(path);
             if (active is null)
             {
@@ -113,7 +190,12 @@ internal sealed class IntelRunner(ILogger logger, SqliteStore db, IEsiClient esi
                 WriteIntelReport(scores.Values.ToList(), sysScore, currentSystem);
             }
 
-            await Task.Delay(750, ct);
+                await Task.Delay(750, ct);
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            logger.LogInformation("Intel watch stopped.");
         }
 
         return 0;
@@ -140,10 +222,57 @@ internal sealed class IntelRunner(ILogger logger, SqliteStore db, IEsiClient esi
         .OrderByDescending(File.GetLastWriteTimeUtc)
         .FirstOrDefault(f => Path.GetFileName(f).Contains("local", StringComparison.OrdinalIgnoreCase));
 
+    private static IEnumerable<string> ExtractPotentialPilotNames(string clipboardText)
+    {
+        var separators = new[] { '\n', '\r', ',', ';', '\t' };
+        return clipboardText.Split(separators, StringSplitOptions.RemoveEmptyEntries)
+            .Select(x => x.Trim())
+            .Where(x => !string.IsNullOrWhiteSpace(x))
+            .Distinct(StringComparer.OrdinalIgnoreCase);
+    }
+
+    private async Task<string?> TryReadClipboardTextAsync(CancellationToken ct)
+    {
+        var commands = new[]
+        {
+            "pbpaste",
+            "xclip -selection clipboard -o",
+            "powershell -NoProfile -Command \"Get-Clipboard -Raw\""
+        };
+
+        foreach (var command in commands)
+        {
+            try
+            {
+                var psi = new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = OperatingSystem.IsWindows() ? "cmd" : "/bin/bash",
+                    Arguments = OperatingSystem.IsWindows() ? $"/c {command}" : $"-lc \"{command}\"",
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                };
+
+                using var process = System.Diagnostics.Process.Start(psi);
+                if (process is null) continue;
+                var output = await process.StandardOutput.ReadToEndAsync(ct);
+                await process.WaitForExitAsync(ct);
+                if (process.ExitCode == 0 && !string.IsNullOrWhiteSpace(output)) return output.Trim();
+            }
+            catch
+            {
+                // Try next clipboard command.
+            }
+        }
+
+        return null;
+    }
+
     private void PrintPilot(PilotThreatScoreResult r)
     {
         logger.LogInformation("THREAT: {Band} ({Score}/100)  {Pilot}", r.Band.ToString().ToUpperInvariant(), r.Score, r.Name);
-        foreach (var reason in r.Reasons.Take(3)) logger.LogInformation("  - {Reason}", reason);
+        foreach (var reason in r.Reasons.Take(2)) logger.LogInformation("  - {Reason}", reason);
         logger.LogInformation("CORP/ALLIANCE: {Corp} / {Alliance}", r.Intel.CorporationName ?? "Unknown", r.Intel.AllianceName ?? "Unknown");
     }
 

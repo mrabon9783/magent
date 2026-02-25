@@ -9,14 +9,13 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
 
+var command = args.FirstOrDefault()?.ToLowerInvariant() ?? "help";
 var loggerFactory = LoggerFactory.Create(builder => builder.AddSimpleConsole(options =>
 {
-    options.TimestampFormat = "yyyy-MM-dd HH:mm:ss ";
+    options.TimestampFormat = command == "intel" ? string.Empty : "yyyy-MM-dd HH:mm:ss ";
 }));
 var logger = loggerFactory.CreateLogger("magent");
 
-var command = args.FirstOrDefault()?.ToLowerInvariant() ?? "help";
-var subcommand = args.Skip(1).FirstOrDefault()?.ToLowerInvariant();
 var app = new MagentApp(loggerFactory);
 
 return command switch
@@ -140,11 +139,17 @@ internal sealed class MagentApp(ILoggerFactory loggerFactory)
         var db = CreateStore();
         db.Initialize();
         var runner = new IntelRunner(_logger, db, CreateEsiClient(), _root);
+        using var cts = new CancellationTokenSource();
+        Console.CancelKeyPress += (_, e) =>
+        {
+            e.Cancel = true;
+            cts.Cancel();
+        };
 
         return mode switch
         {
-            "watch" => await runner.WatchAsync(config, GetOption(intelArgs, "--chatlog-path"), CancellationToken.None),
-            "paste" => await runner.PasteAsync(config, await ReadNamesAsync(intelArgs.Skip(1).ToArray()), null, CancellationToken.None),
+            "watch" => await runner.WatchAsync(config, GetOption(intelArgs, "--chatlog-path"), cts.Token),
+            "paste" => await runner.PasteAsync(config, await ReadNamesAsync(intelArgs.Skip(1).ToArray()), null, cts.Token),
             _ => 0
         };
     }
@@ -170,6 +175,11 @@ internal sealed class MagentApp(ILoggerFactory loggerFactory)
         if (cleaned.Count > 0)
         {
             return cleaned.Where(x => !string.IsNullOrWhiteSpace(x)).ToList();
+        }
+
+        if (!Console.IsInputRedirected)
+        {
+            return [];
         }
 
         var input = await Console.In.ReadToEndAsync();

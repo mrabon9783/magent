@@ -100,7 +100,7 @@ export MAGENT_ESI_CLIENT_SECRET=your_esi_application_client_secret
 
 - `magent intel paste [names...]`
   - Accepts names from args, comma-separated string, or stdin newline list
-  - Resolves pilot threat + system risk in one shot
+  - Starts a long-running clipboard monitor and resolves any newly seen pilot names
 
 ## Reports
 Generated in `out/`:
