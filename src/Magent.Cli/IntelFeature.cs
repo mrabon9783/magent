@@ -238,7 +238,7 @@ internal sealed class CompositePilotIntelSource(IEsiClient esi, ILogger logger) 
             }
         }
 
-        var ratio = kills30 == 0 ? null : (double)lowsec / kills30;
+        var ratio = kills30 == 0 ? 0 : (double)lowsec / kills30;
         return (kills7d, kills30, ratio, last, hunters.Count > 0, hunters.ToList(), []);
     }
 }

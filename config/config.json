@@ -14,9 +14,9 @@
   "WebhookUrl": null,
   "Intel": {
     "ChatlogPath": null,
-    "PilotScoreTtlMinutes": 10,
-    "SystemScoreTtlSeconds": 120,
-    "AlertCooldownSeconds": 300,
+    "PilotScoreTtlMinutes": 30,
+    "SystemScoreTtlSeconds": 300,
+    "AlertCooldownSeconds": 100,
     "SystemAlertThresholdBand": "Med",
     "Denylist": [
       {
