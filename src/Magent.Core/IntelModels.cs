@@ -1,5 +1,9 @@
+using System.Text.Json;
+using System.Text.Json.Serialization;
+
 namespace Magent.Core;
 
+[JsonConverter(typeof(ThreatBandJsonConverter))]
 public enum ThreatBand
 {
     Low,
@@ -68,4 +72,39 @@ public static class ThreatBanding
         >= 30 => ThreatBand.Med,
         _ => ThreatBand.Low
     };
+}
+
+internal sealed class ThreatBandJsonConverter : JsonConverter<ThreatBand>
+{
+    public override ThreatBand Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        if (reader.TokenType == JsonTokenType.String)
+        {
+            var value = reader.GetString()?.Trim();
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                throw new JsonException("Threat band cannot be empty.");
+            }
+
+            return value.ToLowerInvariant() switch
+            {
+                "low" => ThreatBand.Low,
+                "med" or "medium" => ThreatBand.Med,
+                "high" => ThreatBand.High,
+                "extreme" => ThreatBand.Extreme,
+                _ => throw new JsonException($"Unsupported threat band '{value}'.")
+            };
+        }
+
+        if (reader.TokenType == JsonTokenType.Number && reader.TryGetInt32(out var numericBand)
+            && Enum.IsDefined(typeof(ThreatBand), numericBand))
+        {
+            return (ThreatBand)numericBand;
+        }
+
+        throw new JsonException("Threat band must be a string or a valid enum number.");
+    }
+
+    public override void Write(Utf8JsonWriter writer, ThreatBand value, JsonSerializerOptions options)
+        => writer.WriteStringValue(value.ToString());
 }
