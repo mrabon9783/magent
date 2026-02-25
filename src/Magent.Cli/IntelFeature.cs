@@ -49,7 +49,7 @@ internal sealed class IntelRunner(ILogger logger, SqliteStore db, IEsiClient esi
 
             if (changed)
             {
-                await RefreshSystemSummaryAsync(systemSource, scores.Values.ToList(), denylist, systemName, writeReport: true, printSummary: true, ct);
+                //await RefreshSystemSummaryAsync(systemSource, scores.Values.ToList(), denylist, systemName, writeReport: true, printSummary: true, ct);
             }
 
                 await Task.Delay(1000, ct);
@@ -77,7 +77,7 @@ internal sealed class IntelRunner(ILogger logger, SqliteStore db, IEsiClient esi
             return false;
         }
 
-        logger.LogInformation("NEW IN LOCAL: {Pilot} (intel pending)", pilot);
+        //logger.LogInformation("NEW IN LOCAL: {Pilot} (intel pending)", pilot);
         var resolved = await ResolvePilotScoreAsync(pilot, pilotSource, denylist, intelConfig, ct);
         scores[pilot] = resolved;
         PrintPilot(resolved);
@@ -271,9 +271,35 @@ internal sealed class IntelRunner(ILogger logger, SqliteStore db, IEsiClient esi
 
     private void PrintPilot(PilotThreatScoreResult r)
     {
-        logger.LogInformation("THREAT: {Band} ({Score}/100)  {Pilot}", r.Band.ToString().ToUpperInvariant(), r.Score, r.Name);
-        foreach (var reason in r.Reasons.Take(2)) logger.LogInformation("  - {Reason}", reason);
-        logger.LogInformation("CORP/ALLIANCE: {Corp} / {Alliance}", r.Intel.CorporationName ?? "Unknown", r.Intel.AllianceName ?? "Unknown");
+        var band = r.Band.ToString().ToUpperInvariant();
+        var corp = r.Intel.CorporationName ?? "Unknown";
+        var alliance = r.Intel.AllianceName ?? "Unknown";
+
+        ConsoleColor originalColor = Console.ForegroundColor;
+
+        Console.ForegroundColor = GetBandColor(r.Band);
+
+        Console.WriteLine($"THREAT: {band} ({r.Score}/100)  {r.Name}");
+
+        Console.ForegroundColor = originalColor;
+
+        foreach (var reason in r.Reasons.Take(2))
+            Console.WriteLine($"  - {reason}");
+
+        Console.WriteLine($"CORP/ALLIANCE: {corp} / {alliance}");
+        Console.WriteLine(); // spacing
+    }
+
+    private ConsoleColor GetBandColor(ThreatBand band)
+    {
+        return band switch
+        {
+            ThreatBand.Low => ConsoleColor.Green,
+            ThreatBand.Med => ConsoleColor.Yellow,
+            ThreatBand.High => ConsoleColor.Red,
+            ThreatBand.Extreme => ConsoleColor.Magenta,
+            _ => ConsoleColor.White
+        };
     }
 
     private void PrintSummary(IReadOnlyList<PilotThreatScoreResult> list, string system)
