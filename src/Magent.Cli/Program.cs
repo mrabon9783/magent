@@ -1,3 +1,4 @@
+using Magent.Cli;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -15,6 +16,7 @@ var loggerFactory = LoggerFactory.Create(builder => builder.AddSimpleConsole(opt
 var logger = loggerFactory.CreateLogger("magent");
 
 var command = args.FirstOrDefault()?.ToLowerInvariant() ?? "help";
+var subcommand = args.Skip(1).FirstOrDefault()?.ToLowerInvariant();
 var app = new MagentApp(loggerFactory);
 
 return command switch
@@ -25,12 +27,13 @@ return command switch
     "run" => await app.RunAsync(),
     "report" => await app.ReportAsync(),
     "serve" => await app.ServeAsync(),
+    "intel" => await app.IntelAsync(args.Skip(1).ToArray()),
     _ => PrintHelp(logger)
 };
 
 static int PrintHelp(ILogger logger)
 {
-    logger.LogInformation("Commands: magent init | auth | sync | run | report | serve");
+    logger.LogInformation("Commands: magent init | auth | sync | run | report | serve | intel watch | intel paste");
     return 0;
 }
 
@@ -50,7 +53,7 @@ internal sealed class MagentApp(ILoggerFactory loggerFactory)
         var configPath = Path.Combine(_root, "config", "config.json");
         if (!File.Exists(configPath))
         {
-            var config = new AppConfig(10000043, 60008494, 15, 3m, 4.5m, 2m, 50, 250, 500_000_000m, 25m, 20_000_000m, 10, null);
+            var config = new AppConfig(10000043, 60008494, 15, 3m, 4.5m, 2m, 50, 250, 500_000_000m, 25m, 20_000_000m, 10, null, new IntelConfig());
             File.WriteAllText(configPath, JsonSerializer.Serialize(config, new JsonSerializerOptions { WriteIndented = true }));
         }
 
@@ -128,6 +131,53 @@ internal sealed class MagentApp(ILoggerFactory loggerFactory)
         var config = LoadConfig();
         await GenerateReportAndAlertsAsync(config, dedupeAlerts: false);
         return 0;
+    }
+
+    public async Task<int> IntelAsync(string[] intelArgs)
+    {
+        var mode = intelArgs.FirstOrDefault()?.ToLowerInvariant() ?? "help";
+        var config = LoadConfig();
+        var db = CreateStore();
+        db.Initialize();
+        var runner = new IntelRunner(_logger, db, CreateEsiClient(), _root);
+
+        return mode switch
+        {
+            "watch" => await runner.WatchAsync(config, GetOption(intelArgs, "--chatlog-path"), CancellationToken.None),
+            "paste" => await runner.PasteAsync(config, await ReadNamesAsync(intelArgs.Skip(1).ToArray()), null, CancellationToken.None),
+            _ => 0
+        };
+    }
+
+    private static string? GetOption(string[] args, string key)
+    {
+        for (var i = 0; i < args.Length - 1; i++)
+        {
+            if (string.Equals(args[i], key, StringComparison.OrdinalIgnoreCase)) return args[i + 1];
+        }
+
+        return null;
+    }
+
+    private static async Task<IReadOnlyList<string>> ReadNamesAsync(string[] args)
+    {
+        var cleaned = args.Where(x => !x.StartsWith("--", StringComparison.Ordinal)).ToList();
+        if (cleaned.Count == 1 && cleaned[0].Contains(','))
+        {
+            return cleaned[0].Split(',').Select(x => x.Trim()).Where(x => !string.IsNullOrWhiteSpace(x)).ToList();
+        }
+
+        if (cleaned.Count > 0)
+        {
+            return cleaned.Where(x => !string.IsNullOrWhiteSpace(x)).ToList();
+        }
+
+        var input = await Console.In.ReadToEndAsync();
+        return input.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries)
+            .Select(x => x.Trim())
+            .Where(x => !string.IsNullOrWhiteSpace(x))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
     }
 
     public async Task<int> ServeAsync()

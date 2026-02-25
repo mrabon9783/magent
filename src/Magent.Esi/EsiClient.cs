@@ -115,6 +115,78 @@ public sealed class EsiClient(HttpClient httpClient, ILogger<EsiClient> logger) 
         return type?.name;
     }
 
+
+    public async Task<long?> ResolveCharacterIdAsync(string name, CancellationToken cancellationToken)
+    {
+        using var req = new HttpRequestMessage(HttpMethod.Post, "https://esi.evetech.net/latest/universe/ids/");
+        req.Content = new StringContent(JsonSerializer.Serialize(new[] { name }), Encoding.UTF8, "application/json");
+        using var response = await SendWithRetryAsync(req, cancellationToken);
+        if (!response.IsSuccessStatusCode)
+        {
+            return null;
+        }
+
+        var payload = await response.Content.ReadAsStringAsync(cancellationToken);
+        using var doc = JsonDocument.Parse(payload);
+        if (!doc.RootElement.TryGetProperty("characters", out var chars) || chars.GetArrayLength() == 0)
+        {
+            return null;
+        }
+
+        return chars[0].GetProperty("id").GetInt64();
+    }
+
+    public async Task<EsiCharacterPublic?> GetCharacterPublicAsync(long characterId, CancellationToken cancellationToken)
+    {
+        using var req = new HttpRequestMessage(HttpMethod.Get, $"https://esi.evetech.net/latest/characters/{characterId}/");
+        using var response = await SendWithRetryAsync(req, cancellationToken);
+        if (!response.IsSuccessStatusCode)
+        {
+            return null;
+        }
+
+        var payload = await response.Content.ReadAsStringAsync(cancellationToken);
+        using var doc = JsonDocument.Parse(payload);
+        var corp = doc.RootElement.GetProperty("corporation_id").GetInt64();
+        long? alliance = doc.RootElement.TryGetProperty("alliance_id", out var allianceEl) ? allianceEl.GetInt64() : null;
+        double? sec = doc.RootElement.TryGetProperty("security_status", out var secEl) ? secEl.GetDouble() : null;
+        return new EsiCharacterPublic(characterId, corp, alliance, sec);
+    }
+
+    public async Task<string?> GetCorporationNameAsync(long corporationId, CancellationToken cancellationToken)
+    {
+        using var req = new HttpRequestMessage(HttpMethod.Get, $"https://esi.evetech.net/latest/corporations/{corporationId}/");
+        using var response = await SendWithRetryAsync(req, cancellationToken);
+        if (!response.IsSuccessStatusCode) return null;
+        using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync(cancellationToken));
+        return doc.RootElement.TryGetProperty("name", out var name) ? name.GetString() : null;
+    }
+
+    public async Task<string?> GetAllianceNameAsync(long allianceId, CancellationToken cancellationToken)
+    {
+        using var req = new HttpRequestMessage(HttpMethod.Get, $"https://esi.evetech.net/latest/alliances/{allianceId}/");
+        using var response = await SendWithRetryAsync(req, cancellationToken);
+        if (!response.IsSuccessStatusCode) return null;
+        using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync(cancellationToken));
+        return doc.RootElement.TryGetProperty("name", out var name) ? name.GetString() : null;
+    }
+
+    public async Task<IReadOnlyList<EsiSystemKillStats>> GetSystemKillsAsync(CancellationToken cancellationToken)
+    {
+        using var req = new HttpRequestMessage(HttpMethod.Get, "https://esi.evetech.net/latest/universe/system_kills/");
+        using var response = await SendWithRetryAsync(req, cancellationToken);
+        var payload = await response.Content.ReadAsStringAsync(cancellationToken);
+        return JsonSerializer.Deserialize<List<EsiSystemKillStats>>(payload, _jsonOptions) ?? [];
+    }
+
+    public async Task<IReadOnlyList<EsiSystemJumpStats>> GetSystemJumpsAsync(CancellationToken cancellationToken)
+    {
+        using var req = new HttpRequestMessage(HttpMethod.Get, "https://esi.evetech.net/latest/universe/system_jumps/");
+        using var response = await SendWithRetryAsync(req, cancellationToken);
+        var payload = await response.Content.ReadAsStringAsync(cancellationToken);
+        return JsonSerializer.Deserialize<List<EsiSystemJumpStats>>(payload, _jsonOptions) ?? [];
+    }
+
     private async Task<VerifiedCharacter> VerifyCharacterAsync(string refreshToken, CancellationToken cancellationToken)
     {
         using var req = await CreateAuthorizedRequestAsync(HttpMethod.Get, "https://login.eveonline.com/oauth/verify", refreshToken, cancellationToken);

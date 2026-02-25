@@ -11,5 +11,23 @@
   "MaxPortfolioExposurePct": 25.0,
   "MinOrderValue": 20000000.0,
   "MaxOrdersPerCycle": 10,
-  "WebhookUrl": null
+  "WebhookUrl": null,
+  "Intel": {
+    "ChatlogPath": null,
+    "PilotScoreTtlMinutes": 10,
+    "SystemScoreTtlSeconds": 120,
+    "AlertCooldownSeconds": 300,
+    "SystemAlertThresholdBand": "Med",
+    "Denylist": [
+      {
+        "Type": "corp",
+        "Pattern": "Example Pirates",
+        "Weight": 20,
+        "Note": "Sample denylist entry"
+      }
+    ],
+    "WebhookUrl": null,
+    "HighPilotWeight": 10,
+    "ExtremePilotWeight": 20
+  }
 }

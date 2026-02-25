@@ -14,7 +14,7 @@ MVP .NET 8 advisory app for **Amarr station trading radar** in EVE Online.
 - `src/Magent.Core` - domain models, opportunity logic, report rendering
 - `src/Magent.Esi` - ESI HTTP/OAuth client abstraction with retry/backoff and ETag support
 - `src/Magent.Data` - SQLite schema + repository-style persistence
-- `tests/Magent.Core.Tests` - minimal unit tests for opportunity calculations
+- `tests/Magent.Core.Tests` - unit tests for opportunities and intel parsing/scoring/cooldown
 
 ## Configuration
 `config/config.json`:
@@ -33,7 +33,16 @@ MVP .NET 8 advisory app for **Amarr station trading radar** in EVE Online.
   "MaxPortfolioExposurePct": 25.0,
   "MinOrderValue": 20000000.0,
   "MaxOrdersPerCycle": 10,
-  "WebhookUrl": null
+  "WebhookUrl": null,
+  "Intel": {
+    "ChatlogPath": null,
+    "PilotScoreTtlMinutes": 10,
+    "SystemScoreTtlSeconds": 120,
+    "AlertCooldownSeconds": 300,
+    "SystemAlertThresholdBand": "Med",
+    "Denylist": [],
+    "WebhookUrl": null
+  }
 }
 ```
 
@@ -83,10 +92,22 @@ export MAGENT_ESI_CLIENT_SECRET=your_esi_application_client_secret
   - Lets you add/remove watchlist type IDs
   - Lets you select opportunities and copy buy/sell order lines to clipboard
 
+- `magent intel watch [--chatlog-path <path>]`
+  - Watches Windows EVE local chat logs (default `%USERPROFILE%\Documents\EVE\logs\Chatlogs`)
+  - Prints immediate `NEW IN LOCAL` pending lines and resolved threat scores
+  - Produces local summary + system risk updates
+  - Writes `out/intel_latest.md` and `out/intel_latest.html`
+
+- `magent intel paste [names...]`
+  - Accepts names from args, comma-separated string, or stdin newline list
+  - Resolves pilot threat + system risk in one shot
+
 ## Reports
 Generated in `out/`:
 - `today.md`
 - `today.html`
+- `intel_latest.md`
+- `intel_latest.html`
 
 Sections:
 - Timestamp

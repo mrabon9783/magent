@@ -70,6 +70,55 @@ CREATE TABLE IF NOT EXISTS recommendation_outcomes (
   recorded_at TEXT NOT NULL,
   FOREIGN KEY(history_id) REFERENCES recommendation_history(id)
 );
+CREATE TABLE IF NOT EXISTS pilot (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL UNIQUE,
+  character_id INTEGER,
+  corp_id INTEGER,
+  alliance_id INTEGER,
+  last_resolved_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS pilot_score (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  pilot_id INTEGER NOT NULL,
+  score INTEGER NOT NULL,
+  band TEXT NOT NULL,
+  reasons_json TEXT NOT NULL,
+  computed_at TEXT NOT NULL,
+  ttl_until TEXT NOT NULL,
+  FOREIGN KEY(pilot_id) REFERENCES pilot(id)
+);
+CREATE TABLE IF NOT EXISTS local_presence (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  system_id INTEGER,
+  pilot_id INTEGER NOT NULL,
+  first_seen TEXT NOT NULL,
+  last_seen TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  FOREIGN KEY(pilot_id) REFERENCES pilot(id)
+);
+CREATE TABLE IF NOT EXISTS system_state (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  system_id INTEGER,
+  score INTEGER NOT NULL,
+  band TEXT NOT NULL,
+  reasons_json TEXT NOT NULL,
+  computed_at TEXT NOT NULL,
+  ttl_until TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS denylist (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  type TEXT NOT NULL,
+  pattern TEXT NOT NULL,
+  weight INTEGER NOT NULL,
+  note TEXT
+);
+CREATE TABLE IF NOT EXISTS intel_alerts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  alert_key TEXT NOT NULL UNIQUE,
+  band TEXT NOT NULL,
+  sent_at TEXT NOT NULL
+);
 """;
 
         using var command = connection.CreateCommand();
@@ -274,6 +323,93 @@ CREATE TABLE IF NOT EXISTS recommendation_outcomes (
         var changed = Convert.ToInt32(cmd.ExecuteScalar());
         return changed > 0;
     }
+
+
+    public long UpsertPilot(string name, long? characterId, long? corpId, long? allianceId, DateTimeOffset now)
+    {
+        using var connection = Open();
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = """
+INSERT INTO pilot(name,character_id,corp_id,alliance_id,last_resolved_at)
+VALUES($name,$character,$corp,$alliance,$resolved)
+ON CONFLICT(name) DO UPDATE SET
+  character_id=excluded.character_id,
+  corp_id=excluded.corp_id,
+  alliance_id=excluded.alliance_id,
+  last_resolved_at=excluded.last_resolved_at;
+SELECT id FROM pilot WHERE name=$name;
+""";
+        cmd.Parameters.AddWithValue("$name", name);
+        cmd.Parameters.AddWithValue("$character", (object?)characterId ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("$corp", (object?)corpId ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("$alliance", (object?)allianceId ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("$resolved", now.ToString("O"));
+        return Convert.ToInt64(cmd.ExecuteScalar());
+    }
+
+    public (int Score, string Band, string ReasonsJson, DateTimeOffset TtlUntil)? GetPilotScoreCache(long pilotId, DateTimeOffset now)
+    {
+        using var connection = Open();
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = "SELECT score,band,reasons_json,ttl_until FROM pilot_score WHERE pilot_id=$pilotId AND ttl_until >= $now ORDER BY id DESC LIMIT 1;";
+        cmd.Parameters.AddWithValue("$pilotId", pilotId);
+        cmd.Parameters.AddWithValue("$now", now.ToString("O"));
+        using var reader = cmd.ExecuteReader();
+        if (!reader.Read()) return null;
+        return (reader.GetInt32(0), reader.GetString(1), reader.GetString(2), DateTimeOffset.Parse(reader.GetString(3)));
+    }
+
+    public void SavePilotScore(long pilotId, int score, string band, string reasonsJson, DateTimeOffset computedAt, DateTimeOffset ttlUntil)
+    {
+        using var connection = Open();
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = "INSERT INTO pilot_score(pilot_id,score,band,reasons_json,computed_at,ttl_until) VALUES ($pilot,$score,$band,$reasons,$computed,$ttl);";
+        cmd.Parameters.AddWithValue("$pilot", pilotId);
+        cmd.Parameters.AddWithValue("$score", score);
+        cmd.Parameters.AddWithValue("$band", band);
+        cmd.Parameters.AddWithValue("$reasons", reasonsJson);
+        cmd.Parameters.AddWithValue("$computed", computedAt.ToString("O"));
+        cmd.Parameters.AddWithValue("$ttl", ttlUntil.ToString("O"));
+        cmd.ExecuteNonQuery();
+    }
+
+    public bool TryMarkIntelAlertSent(string alertKey, string band, DateTimeOffset now, int cooldownSeconds)
+    {
+        using var connection = Open();
+        using var check = connection.CreateCommand();
+        check.CommandText = "SELECT band,sent_at FROM intel_alerts WHERE alert_key=$key;";
+        check.Parameters.AddWithValue("$key", alertKey);
+        using var reader = check.ExecuteReader();
+        if (reader.Read())
+        {
+            var previousBand = reader.GetString(0);
+            var sentAt = DateTimeOffset.Parse(reader.GetString(1));
+            if (!string.Equals(previousBand, band, StringComparison.OrdinalIgnoreCase) && BandRank(band) > BandRank(previousBand))
+            {
+                // allow immediate escalation
+            }
+            else if ((now - sentAt).TotalSeconds < cooldownSeconds)
+            {
+                return false;
+            }
+        }
+
+        using var upsert = connection.CreateCommand();
+        upsert.CommandText = "INSERT INTO intel_alerts(alert_key,band,sent_at) VALUES($key,$band,$sent) ON CONFLICT(alert_key) DO UPDATE SET band=excluded.band,sent_at=excluded.sent_at;";
+        upsert.Parameters.AddWithValue("$key", alertKey);
+        upsert.Parameters.AddWithValue("$band", band);
+        upsert.Parameters.AddWithValue("$sent", now.ToString("O"));
+        upsert.ExecuteNonQuery();
+        return true;
+    }
+
+    private static int BandRank(string band) => band.ToUpperInvariant() switch
+    {
+        "EXTREME" => 4,
+        "HIGH" => 3,
+        "MED" => 2,
+        _ => 1
+    };
 
 
     public void TrackRecommendationHistory(IEnumerable<Opportunity> opportunities, DateTimeOffset nowUtc)
