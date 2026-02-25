@@ -348,53 +348,97 @@ internal sealed class CompositePilotIntelSource(IEsiClient esi, ILogger logger) 
         try
         {
             var charId = await esi.ResolveCharacterIdAsync(name, cancellationToken);
-            if (charId is null) return new PilotIntel(name, null, null, null, null, null, null, 0, 0, null, null, false, [], ["Character not found in ESI."]);
+            if (charId is null) return new PilotIntel(name, null, null, null, null, null, null, 0, 0, null, null, null, null, false, [], ["Character not found in ESI."]);
             var character = await esi.GetCharacterPublicAsync(charId.Value, cancellationToken);
             var corpName = character is null ? null : await esi.GetCorporationNameAsync(character.CorporationId, cancellationToken);
             var allianceName = character?.AllianceId is null ? null : await esi.GetAllianceNameAsync(character.AllianceId.Value, cancellationToken);
 
             var zkb = await ResolveZkillAsync(charId.Value, cancellationToken);
-            return new PilotIntel(name, charId, character?.CorporationId, corpName, character?.AllianceId, allianceName, character?.SecurityStatus, zkb.Kills7d, zkb.Kills30d, zkb.LowsecRatio, zkb.LastPvpAt, zkb.HunterSeen, zkb.HunterShips, zkb.Notes);
+            return new PilotIntel(name, charId, character?.CorporationId, corpName, character?.AllianceId, allianceName, character?.SecurityStatus, zkb.Kills7d, zkb.Kills30d, zkb.ActivePvpKills, zkb.LowsecRatio, zkb.DangerRatio, zkb.GangRatio, zkb.LastPvpAt, zkb.HunterSeen, zkb.HunterShips, zkb.Notes);
         }
         catch (Exception ex)
         {
             logger.LogWarning(ex, "Failed pilot intel lookup for {Pilot}", name);
-            return new PilotIntel(name, null, null, null, null, null, null, 0, 0, null, null, false, [], ["Pilot intel lookup failed."]);
+            return new PilotIntel(name, null, null, null, null, null, null, 0, 0, null, null, null, null, false, [], ["Pilot intel lookup failed."]);
         }
     }
 
-    private static async Task<(int Kills7d, int Kills30d, double? LowsecRatio, DateTimeOffset? LastPvpAt, bool HunterSeen, IReadOnlyList<string> HunterShips, IReadOnlyList<string> Notes)> ResolveZkillAsync(long charId, CancellationToken ct)
+    private static async Task<(int Kills7d, int Kills30d, int? ActivePvpKills, double? LowsecRatio, int? DangerRatio, int? GangRatio, DateTimeOffset? LastPvpAt, bool HunterSeen, IReadOnlyList<string> HunterShips, IReadOnlyList<string> Notes)> ResolveZkillAsync(long charId, CancellationToken ct)
     {
         using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(20) };
-        var url = $"https://zkillboard.com/api/kills/characterID/{charId}/pastSeconds/{30 * 24 * 3600}/";
-        using var resp = await client.GetAsync(url, ct);
-        if (!resp.IsSuccessStatusCode) return (0, 0, null, null, false, [], ["zKillboard data unavailable."]);
-        using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(ct));
-        if (doc.RootElement.ValueKind != JsonValueKind.Array) return (0, 0, null, null, false, [], ["zKillboard payload unexpected."]);
+        client.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", "magent-intel/1.0");
 
+        var url = $"https://zkillboard.com/api/stats/characterID/{charId}/";
+        using var resp = await client.GetAsync(url, ct);
+        if (!resp.IsSuccessStatusCode) return (0, 0, null, null, null, null, null, false, [], ["zKillboard stats unavailable."]);
+
+        using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(ct));
+        if (doc.RootElement.ValueKind != JsonValueKind.Object) return (0, 0, null, null, null, null, null, false, [], ["zKillboard stats payload unexpected."]);
+
+        var root = doc.RootElement;
         var now = DateTimeOffset.UtcNow;
         var kills7d = 0;
         var kills30 = 0;
-        var lowsec = 0;
-        var hunters = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         DateTimeOffset? last = null;
-        foreach (var row in doc.RootElement.EnumerateArray())
+
+        if (root.TryGetProperty("months", out var months) && months.ValueKind == JsonValueKind.Object)
         {
-            if (!row.TryGetProperty("killmail_time", out var t)) continue;
-            if (!DateTimeOffset.TryParse(t.GetString(), out var when)) continue;
-            kills30++;
-            if (when > now.AddDays(-7)) kills7d++;
-            if (row.TryGetProperty("zkb", out var zkb) && zkb.TryGetProperty("locationID", out _)) lowsec++;
-            last = last is null || when > last ? when : last;
-            if (row.TryGetProperty("victim", out var victim) && victim.TryGetProperty("ship_type_id", out var shipId))
+            foreach (var month in months.EnumerateObject())
             {
-                var sid = shipId.GetInt32();
-                if (sid is 33468 or 33470 or 29990) hunters.Add("Hunter hull");
+                if (month.Value.ValueKind != JsonValueKind.Object) continue;
+                if (!month.Value.TryGetProperty("year", out var y) || !y.TryGetInt32(out var year)) continue;
+                if (!month.Value.TryGetProperty("month", out var m) || !m.TryGetInt32(out var monthNum)) continue;
+                if (year <= 0 || monthNum is < 1 or > 12) continue;
+
+                var destroyed = month.Value.TryGetProperty("shipsDestroyed", out var sd) && sd.TryGetInt32(out var v) ? v : 0;
+                var monthStart = new DateTimeOffset(year, monthNum, 1, 0, 0, 0, TimeSpan.Zero);
+                var nextMonth = monthStart.AddMonths(1);
+                if (nextMonth >= now.AddDays(-30)) kills30 += destroyed;
+                if (nextMonth >= now.AddDays(-7)) kills7d += destroyed;
+                if (destroyed > 0) last = last is null || monthStart > last ? monthStart : last;
             }
         }
 
-        var ratio = kills30 == 0 ? 0 : (double)lowsec / kills30;
-        return (kills7d, kills30, ratio, last, hunters.Count > 0, hunters.ToList(), []);
+        var lowsecRatio = root.TryGetProperty("labels", out var labels)
+            && labels.ValueKind == JsonValueKind.Object
+            && labels.TryGetProperty("loc:lowsec", out var lowsecObj)
+            && lowsecObj.ValueKind == JsonValueKind.Object
+            && lowsecObj.TryGetProperty("shipsDestroyed", out var lowsecKills)
+            && lowsecKills.TryGetInt32(out var lowsecDestroyed)
+            && root.TryGetProperty("shipsDestroyed", out var totalShips)
+            && totalShips.TryGetInt32(out var totalDestroyed)
+            && totalDestroyed > 0
+            ? (double)lowsecDestroyed / totalDestroyed
+            : null;
+
+        var hunterShips = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (root.TryGetProperty("topLists", out var topLists) && topLists.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var list in topLists.EnumerateArray())
+            {
+                if (!list.TryGetProperty("type", out var t) || !string.Equals(t.GetString(), "shipType", StringComparison.OrdinalIgnoreCase)) continue;
+                if (!list.TryGetProperty("values", out var values) || values.ValueKind != JsonValueKind.Array) continue;
+                foreach (var ship in values.EnumerateArray())
+                {
+                    if (!ship.TryGetProperty("shipName", out var nameProp)) continue;
+                    var shipName = nameProp.GetString();
+                    if (!string.IsNullOrWhiteSpace(shipName) && HunterShips.Contains(shipName)) hunterShips.Add(shipName);
+                }
+            }
+        }
+
+        int? activePvpKills = null;
+        if (root.TryGetProperty("activepvp", out var activePvp) && activePvp.ValueKind == JsonValueKind.Object
+            && activePvp.TryGetProperty("kills", out var killsObj) && killsObj.ValueKind == JsonValueKind.Object
+            && killsObj.TryGetProperty("count", out var count) && count.TryGetInt32(out var c))
+        {
+            activePvpKills = c;
+        }
+
+        var dangerRatio = root.TryGetProperty("dangerRatio", out var dr) && dr.TryGetInt32(out var danger) ? danger : null;
+        var gangRatio = root.TryGetProperty("gangRatio", out var gr) && gr.TryGetInt32(out var gang) ? gang : null;
+
+        return (kills7d, kills30, activePvpKills, lowsecRatio, dangerRatio, gangRatio, last, hunterShips.Count > 0, hunterShips.ToList(), []);
     }
 }
 
